@@ -1,0 +1,68 @@
+version: '3.8'
+
+services:
+  fl_server:
+    build:
+      context: .
+      dockerfile: docker/server/Dockerfile
+    container_name: fl_server
+    volumes:
+      - ./data:/app/data
+      - ./models:/app/models
+      - ./shared:/app/shared
+    ports:
+      - "8080:8080"
+    environment:
+      - ROLE=server
+      - NUM_CLIENTS=2
+      - NUM_ROUNDS=10
+      - USE_DP=False
+    networks:
+      - fl_network
+    command: python /app/src/federated_server.py --server_port 8080 --num_rounds 10
+
+  fl_client1:
+    build:
+      context: .
+      dockerfile: docker/client/Dockerfile
+    container_name: fl_client1
+    volumes:
+      - ./data:/app/data:ro
+      - ./models:/app/models
+      - ./shared:/app/shared
+    environment:
+      - ROLE=client
+      - CLIENT_ID=1
+      - SERVER_HOST=fl_server
+      - SERVER_PORT=8080
+      - ALLOW_NEW_CLASSES=True
+    depends_on:
+      - fl_server
+    networks:
+      - fl_network
+    command: python /app/src/federated_client.py --client_id 1 --server_host fl_server --server_port 8080
+
+  fl_client2:
+    build:
+      context: .
+      dockerfile: docker/client/Dockerfile
+    container_name: fl_client2
+    volumes:
+      - ./data:/app/data:ro
+      - ./models:/app/models
+      - ./shared:/app/shared
+    environment:
+      - ROLE=client
+      - CLIENT_ID=2
+      - SERVER_HOST=fl_server
+      - SERVER_PORT=8080
+      - ALLOW_NEW_CLASSES=True
+    depends_on:
+      - fl_server
+    networks:
+      - fl_network
+    command: python /app/src/federated_client.py --client_id 2 --server_host fl_server --server_port 8080
+
+networks:
+  fl_network:
+    driver: bridge 
