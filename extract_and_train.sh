@@ -542,30 +542,33 @@ mkdir -p models
 if [ "$SKIP_TRAINING" = false ]; then
     # Step 3: Train the server model
     echo "=== Step 3: Training server model ==="
+    echo "Using ResNet50 with Squeeze-and-Excitation and Efficient Channel Attention"
     # Silence TensorFlow warnings in terminal output
     export TF_CPP_MIN_LOG_LEVEL=3
     # Run the separate Python script for server model training with improved parameters
-    $PYTHON_CMD train_server_model.py --data-dir data/partitioned/server --model-dir models --epochs 50 --img-size 224 --batch-size 64 --lr 0.001
+    $PYTHON_CMD train_server_model.py --data-dir data/partitioned/server --model-dir models --epochs 50 --img-size 224 --batch-size 32 --lr 0.001 --debug
 
     # Step 4: Train client1 model
     echo "=== Step 4: Training client1 model ==="
+    echo "Using ResNet50 with Squeeze-and-Excitation and Efficient Channel Attention"
     # Silence TensorFlow warnings in terminal output
     export TF_CPP_MIN_LOG_LEVEL=3
     # Run the separate Python script for client1 model training with improved parameters
-    $PYTHON_CMD train_client_model.py --client-id client1 --data-dir data/partitioned/client1 --model-dir models --epochs 50 --img-size 224 --batch-size 64 --lr 0.001
+    $PYTHON_CMD train_client_model.py --client-id client1 --data-dir data/partitioned/client1 --model-dir models --epochs 50 --img-size 224 --batch-size 32 --lr 0.001 --debug
 
     # Step 5: Train client2 model
     echo "=== Step 5: Training client2 model ==="
+    echo "Using ResNet50 with Squeeze-and-Excitation and Efficient Channel Attention"
     # Silence TensorFlow warnings in terminal output
     export TF_CPP_MIN_LOG_LEVEL=3
     # Run the separate Python script for client2 model training with improved parameters
-    $PYTHON_CMD train_client_model.py --client-id client2 --data-dir data/partitioned/client2 --model-dir models --epochs 50 --img-size 224 --batch-size 64 --lr 0.001
+    $PYTHON_CMD train_client_model.py --client-id client2 --data-dir data/partitioned/client2 --model-dir models --epochs 50 --img-size 224 --batch-size 32 --lr 0.001 --debug
 else
     echo "=== Skipping model training steps ==="
     echo "To train the models separately, run:"
-    echo "  $PYTHON_CMD train_server_model.py --img-size 224 --batch-size 64 # Train server model"
-    echo "  $PYTHON_CMD train_client_model.py --client-id client1 --img-size 224 --batch-size 64 # Train client1 model" 
-    echo "  $PYTHON_CMD train_client_model.py --client-id client2 --img-size 224 --batch-size 64 # Train client2 model"
+    echo "  $PYTHON_CMD train_server_model.py --img-size 224 --batch-size 32 --debug # Train server model"
+    echo "  $PYTHON_CMD train_client_model.py --client-id client1 --img-size 224 --batch-size 32 --debug # Train client1 model" 
+    echo "  $PYTHON_CMD train_client_model.py --client-id client2 --img-size 224 --batch-size 32 --debug # Train client2 model"
 fi
 
 echo "=== Complete Pipeline Finished ==="
