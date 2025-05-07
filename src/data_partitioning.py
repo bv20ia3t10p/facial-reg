@@ -40,81 +40,102 @@ def partition_dataset(extracted_dir, output_base_dir, server_ratio=0.9, client_r
     person_dirs = [d for d in os.listdir(extracted_dir) 
                   if os.path.isdir(os.path.join(extracted_dir, d))]
     
-    # For each person directory, split the images
-    all_images = []
-    for person_dir in tqdm(person_dirs, desc="Indexing classes"):
-        person_path = os.path.join(extracted_dir, person_dir)
-        images = [os.path.join(person_path, img) for img in os.listdir(person_path) 
-                 if img.endswith(('.jpg', '.jpeg', '.png'))]
-        
-        # Skip if no images
-        if not images:
-            continue
-            
-        # Add person_id and images to the list
-        for img in images:
-            all_images.append({
-                'image_path': img,
-                'person_id': person_dir
-            })
+    print(f"Found {len(person_dirs)} total class directories")
     
-    # Convert to DataFrame
-    df = pd.DataFrame(all_images)
+    # Shuffle the class directories for random assignment
+    np.random.seed(42)  # For reproducibility
+    np.random.shuffle(person_dirs)
     
-    # Group by person_id to ensure stratified split
-    partitioned_data = {'server': [], 'client1': [], 'client2': []}
+    # Calculate number of classes for each partition (90% server, 5% each client)
+    total_classes = len(person_dirs)
+    client1_size = int(total_classes * client_ratio)
+    client2_size = int(total_classes * client_ratio)
+    server_size = total_classes - client1_size - client2_size
     
-    for person_id, group in tqdm(df.groupby('person_id'), desc="Partitioning data"):
-        # Get all images for this person
-        person_images = group['image_path'].tolist()
-        
-        # Split into server (90%) and remaining (10%)
-        server_images, remaining_images = train_test_split(
-            person_images, train_size=server_ratio, random_state=42)
-        
-        # Split remaining into client1 (5%) and client2 (5%)
-        if len(remaining_images) > 1:
-            client1_images, client2_images = train_test_split(
-                remaining_images, train_size=0.5, random_state=42)
-        else:
-            # If only one image, assign to client1
-            client1_images = remaining_images
-            client2_images = []
-        
-        # Add to partitioned data
-        partitioned_data['server'].extend([(img, person_id) for img in server_images])
-        partitioned_data['client1'].extend([(img, person_id) for img in client1_images])
-        partitioned_data['client2'].extend([(img, person_id) for img in client2_images])
+    # Split class directories
+    server_classes = person_dirs[:server_size]
+    client1_classes = person_dirs[server_size:server_size+client1_size]
+    client2_classes = person_dirs[server_size+client1_size:]
     
-    # Create symbolic links or copy files to destination directories
-    partition_dirs = {
-        'server': server_dir,
-        'client1': client1_dir,
-        'client2': client2_dir
+    print(f"Class distribution: Server: {len(server_classes)}, Client1: {len(client1_classes)}, Client2: {len(client2_classes)}")
+    
+    # Dictionary to track stats
+    stats = {
+        'server': {'classes': 0, 'images': 0},
+        'client1': {'classes': 0, 'images': 0},
+        'client2': {'classes': 0, 'images': 0}
     }
     
-    # Process each partition
-    for partition_name, image_list in partitioned_data.items():
-        dest_dir = partition_dirs[partition_name]
+    # Process server classes
+    for class_dir in tqdm(server_classes, desc="Processing server classes"):
+        src_path = os.path.join(extracted_dir, class_dir)
+        dst_path = os.path.join(server_dir, class_dir)
         
-        # Create class directories and copy/link images
-        for img_path, person_id in tqdm(image_list, 
-                                        desc=f"Creating {partition_name} partition"):
-            # Create class directory if it doesn't exist
-            class_dir = os.path.join(dest_dir, person_id)
-            os.makedirs(class_dir, exist_ok=True)
+        # Skip if source doesn't exist
+        if not os.path.exists(src_path):
+            continue
             
-            # Copy or link the image
-            img_filename = os.path.basename(img_path)
-            dest_path = os.path.join(class_dir, img_filename)
-            
-            # Use copy instead of link for better compatibility
-            shutil.copy2(img_path, dest_path)
+        # Create class directory
+        os.makedirs(dst_path, exist_ok=True)
+        
+        # Copy all images
+        images = [img for img in os.listdir(src_path) if img.endswith(('.jpg', '.jpeg', '.png'))]
+        for img in images:
+            src_img = os.path.join(src_path, img)
+            dst_img = os.path.join(dst_path, img)
+            shutil.copy2(src_img, dst_img)
+        
+        stats['server']['classes'] += 1
+        stats['server']['images'] += len(images)
     
-    print(f"Dataset partitioning complete:")
-    print(f"  Server: {len(partitioned_data['server'])} images")
-    print(f"  Client 1: {len(partitioned_data['client1'])} images")
-    print(f"  Client 2: {len(partitioned_data['client2'])} images")
+    # Process client1 classes
+    for class_dir in tqdm(client1_classes, desc="Processing client1 classes"):
+        src_path = os.path.join(extracted_dir, class_dir)
+        dst_path = os.path.join(client1_dir, class_dir)
+        
+        # Skip if source doesn't exist
+        if not os.path.exists(src_path):
+            continue
+            
+        # Create class directory
+        os.makedirs(dst_path, exist_ok=True)
+        
+        # Copy all images
+        images = [img for img in os.listdir(src_path) if img.endswith(('.jpg', '.jpeg', '.png'))]
+        for img in images:
+            src_img = os.path.join(src_path, img)
+            dst_img = os.path.join(dst_path, img)
+            shutil.copy2(src_img, dst_img)
+        
+        stats['client1']['classes'] += 1
+        stats['client1']['images'] += len(images)
+    
+    # Process client2 classes
+    for class_dir in tqdm(client2_classes, desc="Processing client2 classes"):
+        src_path = os.path.join(extracted_dir, class_dir)
+        dst_path = os.path.join(client2_dir, class_dir)
+        
+        # Skip if source doesn't exist
+        if not os.path.exists(src_path):
+            continue
+            
+        # Create class directory
+        os.makedirs(dst_path, exist_ok=True)
+        
+        # Copy all images
+        images = [img for img in os.listdir(src_path) if img.endswith(('.jpg', '.jpeg', '.png'))]
+        for img in images:
+            src_img = os.path.join(src_path, img)
+            dst_img = os.path.join(dst_path, img)
+            shutil.copy2(src_img, dst_img)
+        
+        stats['client2']['classes'] += 1
+        stats['client2']['images'] += len(images)
+    
+    print(f"Dataset partitioning complete.")
+    print(f"Server: {stats['server']['classes']} classes, {stats['server']['images']} total images")
+    print(f"Client1: {stats['client1']['classes']} classes, {stats['client1']['images']} total images")
+    print(f"Client2: {stats['client2']['classes']} classes, {stats['client2']['images']} total images")
     
     return {
         'server': server_dir,
@@ -122,60 +143,65 @@ def partition_dataset(extracted_dir, output_base_dir, server_ratio=0.9, client_r
         'client2': client2_dir
     }
 
-def create_client_unseen_classes(extracted_dir, client_dir, num_unseen_classes=10):
+def create_client_unseen_classes(extracted_dir, client_dir, num_unseen=10):
     """
-    Create unseen classes for a client that don't exist in the server dataset.
+    Add unseen classes to client dataset.
     
     Args:
         extracted_dir: Directory containing the full extracted dataset
-        client_dir: Directory for the client's data
-        num_unseen_classes: Number of unseen classes to add
-        
-    Returns:
-        List of unseen class IDs added
+        client_dir: Client directory to add unseen classes to
+        num_unseen: Number of unseen classes to add
     """
-    print(f"Adding {num_unseen_classes} unseen classes to {client_dir}")
+    print(f"Adding {num_unseen} unseen classes to {client_dir}")
     
-    # Get existing class directories in client directory
-    existing_classes = {d for d in os.listdir(client_dir) 
-                      if os.path.isdir(os.path.join(client_dir, d))}
+    # Get all person directories in the full dataset
+    all_person_dirs = [d for d in os.listdir(extracted_dir) 
+                     if os.path.isdir(os.path.join(extracted_dir, d))]
     
-    # Get all available classes from the full dataset
-    all_classes = {d for d in os.listdir(extracted_dir) 
-                  if os.path.isdir(os.path.join(extracted_dir, d))}
+    # Get person directories already in client data
+    client_person_dirs = [d for d in os.listdir(client_dir)
+                        if os.path.isdir(os.path.join(client_dir, d))]
     
-    # Find classes not in the client directory
-    candidate_classes = all_classes - existing_classes
+    # Find unseen persons (not in client data)
+    unseen_persons = [p for p in all_person_dirs if p not in client_person_dirs]
     
-    # Select random unseen classes
-    if len(candidate_classes) < num_unseen_classes:
-        unseen_classes = list(candidate_classes)
-        print(f"Warning: Only {len(unseen_classes)} unseen classes available")
-    else:
-        unseen_classes = np.random.choice(
-            list(candidate_classes), num_unseen_classes, replace=False)
+    # If not enough unseen persons, just use what we have
+    num_unseen = min(num_unseen, len(unseen_persons))
     
-    # Copy images from unseen classes
-    for class_id in unseen_classes:
-        src_class_dir = os.path.join(extracted_dir, class_id)
-        dst_class_dir = os.path.join(client_dir, class_id)
+    if num_unseen == 0:
+        print("No unseen classes available to add.")
+        return
+    
+    # Randomly select unseen persons
+    np.random.seed(42)  # For reproducibility
+    selected_unseen = np.random.choice(unseen_persons, size=num_unseen, replace=False)
+    
+    # Add unseen classes to client
+    unseen_added = 0
+    total_images = 0
+    
+    for person_dir in tqdm(selected_unseen, desc="Adding unseen classes"):
+        src_path = os.path.join(extracted_dir, person_dir)
+        dst_path = os.path.join(client_dir, person_dir)
         
-        # Create destination directory
-        os.makedirs(dst_class_dir, exist_ok=True)
+        # Skip if source doesn't exist
+        if not os.path.exists(src_path):
+            continue
+            
+        # Create class directory
+        os.makedirs(dst_path, exist_ok=True)
         
-        # Get all images for this class
-        images = [img for img in os.listdir(src_class_dir) 
-                if img.endswith(('.jpg', '.jpeg', '.png'))]
-        
-        # Copy images
+        # Copy all images
+        images = [img for img in os.listdir(src_path) if img.endswith(('.jpg', '.jpeg', '.png'))]
         for img in images:
-            src_path = os.path.join(src_class_dir, img)
-            dst_path = os.path.join(dst_class_dir, img)
-            shutil.copy2(src_path, dst_path)
+            src_img = os.path.join(src_path, img)
+            dst_img = os.path.join(dst_path, img)
+            shutil.copy2(src_img, dst_img)
         
-        print(f"Added unseen class {class_id} with {len(images)} images")
+        unseen_added += 1
+        total_images += len(images)
     
-    return list(unseen_classes)
+    print(f"Added {unseen_added} unseen classes with {total_images} images to {client_dir}")
 
 if __name__ == "__main__":
     import argparse
