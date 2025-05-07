@@ -1,0 +1,60 @@
+# Git
+.git
+.gitignore
+.github
+
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+.Python
+env/
+venv/
+.venv/
+.env
+.pytest_cache/
+.coverage
+htmlcov/
+
+# Docker
+.dockerignore
+Dockerfile*
+docker-compose*
+.docker/
+
+# Data and models (except necessary files)
+data/extracted/
+data/partitioned/
+models/
+shared/
+
+# Logs and runtime artifacts
+logs/
+*.log
+tensorboard/
+*.tfevents.*
+output/
+runs/
+checkpoints/
+
+# Development
+.idea/
+.vscode/
+*.swp
+*.swo
+.DS_Store
+*.ipynb
+.ipynb_checkpoints/
+
+# Build artifacts
+dist/
+build/
+*.egg-info/
+
+# Documentation
+docs/
+*.md
+!README.md
+!FEDERATED_LEARNING.md
+!FEDERATED_TRAINING.md 
