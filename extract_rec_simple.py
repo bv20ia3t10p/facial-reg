@@ -431,16 +431,17 @@ def extract_images_using_scan(rec_file, output_dir, lst_file=None, max_images=No
         except Exception as e:
             logger.warning(f"Error parsing LST file for class information: {e}")
     
-    # If max_classes is specified, limit the classes to consider
+    # Get unique classes and limit them if max_classes is specified
     unique_classes = set()
     if class_info:
         unique_classes = set(class_info.values())
         logger.info(f"Found {len(unique_classes)} unique classes in LST file")
         
         if max_classes and len(unique_classes) > max_classes:
-            # Take a subset of classes
-            unique_classes = set(sorted(list(unique_classes))[:max_classes])
-            logger.info(f"Limiting to {max_classes} classes")
+            # Take a subset of classes - sort for consistent ordering
+            sorted_classes = sorted(list(unique_classes))
+            unique_classes = set(sorted_classes[:max_classes])
+            logger.info(f"Limited to first {max_classes} classes (sorted alphabetically)")
             
             # Filter class_info to only include these classes
             filtered_class_info = {}
@@ -450,25 +451,27 @@ def extract_images_using_scan(rec_file, output_dir, lst_file=None, max_images=No
             class_info = filtered_class_info
             logger.info(f"Filtered class info to {len(class_info)} entries for {len(unique_classes)} classes")
     
-    # Create default classes if no LST file or if parsing failed
-    if not class_info:
-        logger.info("No valid class information found, using sequential classes")
-        # Create a few default classes
-        for i in range(1, min(11, max_classes + 1 if max_classes else 11)):
-            class_name = f"{i:05d}"
-            class_dir = os.path.join(output_dir, class_name)
-            os.makedirs(class_dir, exist_ok=True)
-    else:
-        # Create directories for classes found in LST file
+    # Create directories for the selected classes
+    if unique_classes:
         for class_name in unique_classes:
             class_dir = os.path.join(output_dir, class_name)
             os.makedirs(class_dir, exist_ok=True)
-        logger.info(f"Created directories for {len(unique_classes)} unique classes")
+        logger.info(f"Created directories for {len(unique_classes)} classes")
+    else:
+        # Create default classes if no LST file or if parsing failed
+        logger.info("No valid class information found, using sequential classes")
+        max_default_classes = max_classes if max_classes else 10
+        for i in range(1, max_default_classes + 1):
+            class_name = f"{i:05d}"
+            class_dir = os.path.join(output_dir, class_name)
+            os.makedirs(class_dir, exist_ok=True)
+            unique_classes.add(class_name)
     
     # Recognized image signatures
     jpeg_signature = b'\xff\xd8\xff'
     
     logger.info(f"Scanning for JPEG images in {rec_file}")
+    logger.info(f"Target: {len(unique_classes)} classes, stopping when target is reached")
     
     # Initialize counters and buffers
     image_count = 0
@@ -494,10 +497,16 @@ def extract_images_using_scan(rec_file, output_dir, lst_file=None, max_images=No
                     logger.info(f"Reached maximum number of images: {max_images}")
                     break
                 
-                # If max_classes is set and we've reached that many classes with at least one image
-                if max_classes and len(classes_used) >= max_classes and all(classes_count.get(c, 0) > 0 for c in classes_used):
-                    logger.info(f"Reached maximum number of classes: {max_classes}")
-                    break
+                # IMPROVED: Stop extraction when we have the target number of classes with sufficient images
+                if max_classes and len(classes_used) >= max_classes:
+                    # Check if all classes have at least 5 images
+                    classes_with_enough_images = sum(1 for c in classes_used if classes_count.get(c, 0) >= 5)
+                    if classes_with_enough_images >= max_classes:
+                        logger.info(f"Reached target of {max_classes} classes with at least 5 images each")
+                        break
+                    elif len(classes_used) >= max_classes * 1.5:  # Safety limit to prevent over-extraction
+                        logger.info(f"Reached safety limit: {len(classes_used)} classes processed")
+                        break
                 
                 # Read next chunk
                 chunk = f.read(buffer_size)
@@ -528,7 +537,7 @@ def extract_images_using_scan(rec_file, output_dir, lst_file=None, max_images=No
                     else:
                         img_data = buffer[img_start:next_img_start]
                     
-                    # Assign to a class directory - use round-robin if no specific mapping
+                    # Assign to a class directory
                     if image_count in class_info:
                         class_name = class_info[image_count]
                         # Skip if this class is not in our limited set
@@ -536,11 +545,18 @@ def extract_images_using_scan(rec_file, output_dir, lst_file=None, max_images=No
                             start_pos = img_start + 3
                             continue
                     else:
-                        # Round-robin assignment to classes 1-10
-                        class_name = f"{(image_count % 10) + 1:05d}"
+                        # Round-robin assignment to available classes
+                        available_classes = list(unique_classes)
+                        if available_classes:
+                            class_name = available_classes[image_count % len(available_classes)]
+                        else:
+                            class_name = f"{(image_count % 10) + 1:05d}"
                     
-                    # Skip if we've already processed max_classes
-                    if max_classes and len(classes_used) >= max_classes and class_name not in classes_used:
+                    # Skip if we already have enough images for this class and we're trying to balance
+                    if (max_classes and 
+                        len(classes_used) >= max_classes and 
+                        class_name not in classes_used and
+                        len([c for c in classes_used if classes_count.get(c, 0) >= 10]) >= max_classes * 0.8):
                         start_pos = img_start + 3
                         continue
                     
@@ -558,8 +574,12 @@ def extract_images_using_scan(rec_file, output_dir, lst_file=None, max_images=No
                         # Update class count
                         classes_count[class_name] = classes_count.get(class_name, 0) + 1
                         
-                        if image_count % 10 == 0:
+                        if image_count % 50 == 0:
                             logger.info(f"Extracted {image_count} images across {len(classes_used)} classes")
+                            # Show progress toward target
+                            if max_classes:
+                                classes_with_min_images = sum(1 for c in classes_used if classes_count.get(c, 0) >= 5)
+                                logger.info(f"Progress: {classes_with_min_images}/{max_classes} classes with ≥5 images")
                     except Exception as e:
                         # Skip invalid images silently - quite common when scanning binary files
                         pass
@@ -574,20 +594,34 @@ def extract_images_using_scan(rec_file, output_dir, lst_file=None, max_images=No
                 else:
                     position = f.tell()
     
-        logger.info(f"Scanning complete. Extracted {image_count} images across {len(classes_used)} classes")
+        logger.info(f"Extraction complete. Extracted {image_count} images across {len(classes_used)} classes")
         
         # Print class distribution stats
         if classes_count:
             logger.info("Class distribution:")
-            top_classes = sorted(classes_count.items(), key=lambda x: x[1], reverse=True)[:20]
+            sorted_classes = sorted(classes_count.items(), key=lambda x: x[1], reverse=True)
+            
+            # Show top classes
+            top_classes = sorted_classes[:20]
             for cls, count in top_classes:
                 logger.info(f"  {cls}: {count} images")
+            
+            # Show classes with insufficient images
+            insufficient_classes = [(cls, count) for cls, count in sorted_classes if count < 5]
+            if insufficient_classes:
+                logger.warning(f"Found {len(insufficient_classes)} classes with <5 images:")
+                for cls, count in insufficient_classes[:10]:  # Show first 10
+                    logger.warning(f"  {cls}: {count} images")
         
         # Verify we have extracted something
         if image_count == 0:
             logger.warning("No images were extracted. The RecordIO file may be in a different format.")
             return False
-            
+        
+        # Final summary
+        classes_with_min_images = sum(1 for c in classes_used if classes_count.get(c, 0) >= 5)
+        logger.info(f"Final result: {classes_with_min_images} classes with at least 5 images")
+        
         return True
     except Exception as e:
         logger.error(f"Error during scanning: {e}")

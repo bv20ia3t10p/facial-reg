@@ -8,7 +8,8 @@ param (
     [string]$output_dir = "data\casia-extracted",
     [string]$partitioned_dir = "data\partitioned",
     [int]$max_images = $null,
-    [int]$max_classes = 750,
+    [int]$max_classes = 300,
+    [int]$classes_per_split = 100,
     [switch]$skip_extraction,
     [switch]$skip_partitioning,
     [switch]$help
@@ -16,7 +17,7 @@ param (
 
 # Show help if requested
 if ($help) {
-    Write-Host "Usage: .\Extract-CasiaDataset.ps1 [-rec_file <path>] [-idx_file <path>] [-output_dir <path>] [-partitioned_dir <path>] [-max_images <num>] [-max_classes <num>] [-skip_extraction] [-skip_partitioning] [-help]" -ForegroundColor Yellow
+    Write-Host "Usage: .\Extract-CasiaDataset.ps1 [-rec_file <path>] [-idx_file <path>] [-output_dir <path>] [-partitioned_dir <path>] [-max_images <num>] [-max_classes <num>] [-classes_per_split <num>] [-skip_extraction] [-skip_partitioning] [-help]" -ForegroundColor Yellow
     Write-Host ""
     Write-Host "Options:" -ForegroundColor Yellow
     Write-Host "  -rec_file           Path to the .rec file. Default: data\casia-webface\train.rec"
@@ -24,7 +25,8 @@ if ($help) {
     Write-Host "  -output_dir         Directory to save extracted images. Default: data\casia-extracted"
     Write-Host "  -partitioned_dir    Directory to save partitioned dataset. Default: data\partitioned"
     Write-Host "  -max_images         Maximum number of images to extract (for testing)"
-    Write-Host "  -max_classes        Maximum number of classes to extract (default: 750)"
+    Write-Host "  -max_classes        Maximum number of classes to extract (default: 300)"
+    Write-Host "  -classes_per_split  Number of classes per split (default: 100)"
     Write-Host "  -skip_extraction    Skip extraction stage (if you already extracted images)"
     Write-Host "  -skip_partitioning  Skip partitioning stage"
     Write-Host "  -help               Show this help message"
@@ -33,6 +35,7 @@ if ($help) {
 
 Write-Host "CASIA-WebFace Dataset Extraction and Preparation" -ForegroundColor Cyan
 Write-Host "============================================================" -ForegroundColor Cyan
+Write-Host "Target: $classes_per_split classes per split (Total: $($classes_per_split * 3) classes)" -ForegroundColor Cyan
 
 # Check if rec_file exists
 if (-not (Test-Path $rec_file) -and -not $skip_extraction) {
@@ -108,11 +111,19 @@ if (-not $skip_extraction) {
         exit 1
     }
     
+    # Validate class count configuration
+    $expected_total = $classes_per_split * 3
+    if ($max_classes -ne $expected_total) {
+        Write-Host "Warning: max_classes ($max_classes) doesn't match expected total ($expected_total = $classes_per_split * 3)" -ForegroundColor Yellow
+        Write-Host "Adjusting max_classes to $expected_total to ensure $classes_per_split classes per split" -ForegroundColor Yellow
+        $max_classes = $expected_total
+    }
+    
     # Run extraction
     Write-Host "Extracting CASIA-WebFace dataset from RecordIO files..." -ForegroundColor Green
     Write-Host "This may take some time depending on the dataset size." -ForegroundColor Yellow
     Write-Host "The output directory will be completely cleaned before extraction begins." -ForegroundColor Yellow
-    Write-Host "Limiting to maximum of $max_classes classes." -ForegroundColor Yellow
+    Write-Host "Limiting to maximum of $max_classes classes ($classes_per_split per split)." -ForegroundColor Yellow
     
     $lstFile = $rec_file -replace "\.rec$", ".lst"
     if (Test-Path $lstFile) {
@@ -183,7 +194,7 @@ if (-not $skip_partitioning) {
     New-Item -ItemType Directory -Path $client1Dir -Force | Out-Null
     New-Item -ItemType Directory -Path $client2Dir -Force | Out-Null
     
-    Write-Host "Partitioning dataset into server and client sets (2-2-2 ratio)..." -ForegroundColor Green
+    Write-Host "Partitioning dataset into server and client sets ($classes_per_split classes each)..." -ForegroundColor Green
     
     # Get all class directories
     $classDirectories = Get-ChildItem -Path $output_dir -Directory | Where-Object { 
@@ -200,18 +211,31 @@ if (-not $skip_partitioning) {
         exit 1
     }
     
-    # Calculate class splits (1/3 each)
-    $serverClassCount = [math]::Floor($totalClasses / 3)
-    $client1ClassCount = [math]::Floor($totalClasses / 3)
-    $client2ClassCount = $totalClasses - $serverClassCount - $client1ClassCount
+    # Check if we have enough classes for the desired split
+    $requiredClasses = $classes_per_split * 3
+    if ($totalClasses -lt $requiredClasses) {
+        Write-Host "Warning: Only found $totalClasses classes, but need $requiredClasses for $classes_per_split per split" -ForegroundColor Yellow
+        $classes_per_split = [math]::Floor($totalClasses / 3)
+        Write-Host "Adjusting to $classes_per_split classes per split" -ForegroundColor Yellow
+        
+        if ($classes_per_split -eq 0) {
+            Write-Host "Error: Not enough classes to create meaningful splits" -ForegroundColor Red
+            exit 1
+        }
+    }
+    
+    # Use exactly the specified number of classes per split
+    $serverClassCount = $classes_per_split
+    $client1ClassCount = $classes_per_split
+    $client2ClassCount = $classes_per_split
     
     Write-Host "Partitioning into: Server=$serverClassCount classes, Client1=$client1ClassCount classes, Client2=$client2ClassCount classes" -ForegroundColor Yellow
     
-    # Partition classes
+    # Shuffle classes randomly and take exactly the required number for each split
     $shuffledClasses = $classDirectories | Sort-Object { Get-Random }
     $serverClasses = $shuffledClasses[0..($serverClassCount-1)]
     $client1Classes = $shuffledClasses[$serverClassCount..($serverClassCount+$client1ClassCount-1)]
-    $client2Classes = $shuffledClasses[($serverClassCount+$client1ClassCount)..($totalClasses-1)]
+    $client2Classes = $shuffledClasses[($serverClassCount+$client1ClassCount)..($serverClassCount+$client1ClassCount+$client2ClassCount-1)]
     
     # Copy server classes
     Write-Host "Copying server classes..." -ForegroundColor Yellow
@@ -253,7 +277,11 @@ if (-not $skip_partitioning) {
     Write-Host "Server: $serverClassCount classes, $serverImages images" -ForegroundColor Green
     Write-Host "Client1: $client1ClassCount classes, $client1Images images" -ForegroundColor Green
     Write-Host "Client2: $client2ClassCount classes, $client2Images images" -ForegroundColor Green
-    Write-Host "Total: $totalClasses classes, $totalImages images" -ForegroundColor Green
+    Write-Host "Total used: $($serverClassCount + $client1ClassCount + $client2ClassCount) classes, $totalImages images" -ForegroundColor Green
+    if ($totalClasses -gt ($serverClassCount + $client1ClassCount + $client2ClassCount)) {
+        $unusedClasses = $totalClasses - ($serverClassCount + $client1ClassCount + $client2ClassCount)
+        Write-Host "Note: $unusedClasses classes were extracted but not used in partitioning" -ForegroundColor Yellow
+    }
 }
 else {
     Write-Host "Skipping partitioning stage as requested." -ForegroundColor Yellow
@@ -264,6 +292,11 @@ Write-Host ""
 Write-Host "CASIA-WebFace dataset has been processed successfully!" -ForegroundColor Green
 Write-Host "  - Extracted data: $output_dir" -ForegroundColor Green
 Write-Host "  - Partitioned data: $partitioned_dir" -ForegroundColor Green
+Write-Host ""
+Write-Host "IMPROVED EFFICIENCY:" -ForegroundColor Cyan
+Write-Host "  - Now extracts exactly $($classes_per_split * 3) classes total ($classes_per_split per split)" -ForegroundColor Cyan
+Write-Host "  - Stops extraction early once target classes are reached" -ForegroundColor Cyan
+Write-Host "  - Each split gets exactly $classes_per_split classes" -ForegroundColor Cyan
 Write-Host ""
 Write-Host "You can now run the training script with:" -ForegroundColor Cyan
 Write-Host "    .\train_model.ps1 -mode server -data_dir '.\$partitioned_dir\server' -model_dir '.\models'" -ForegroundColor Cyan
