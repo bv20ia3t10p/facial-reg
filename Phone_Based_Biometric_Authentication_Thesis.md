@@ -3570,3 +3570,104 @@ def log_training_event(event_type, details):
 ```
 
 This comprehensive documentation covers the complete neural network architecture, 10-fold cross validation implementation, federated learning system, dynamic employee enrollment, and privacy protection mechanisms used in the biometric authentication system.
+
+### 3.8 Neural Network Architecture Implementation
+
+#### 3.8.1 SimpleBiometricModel Architecture
+
+The system implements a lightweight yet effective convolutional neural network optimized for mobile-first biometric authentication:
+
+**Feature Extractor:**
+```python
+features = nn.Sequential(
+    nn.Conv2d(3, 32, 3, padding=1),  # Input RGB → 32 channels
+    nn.ReLU(),
+    nn.MaxPool2d(2),                 # Spatial reduction
+    nn.Conv2d(32, 64, 3, padding=1), # 32 → 64 channels
+    nn.ReLU(),
+    nn.MaxPool2d(2),                 # Further reduction
+    nn.Conv2d(64, 128, 3, padding=1),# 64 → 128 channels
+    nn.ReLU(),
+    nn.AdaptiveAvgPool2d((4, 4))     # Fixed output size
+)
+```
+
+**Classifier:**
+```python
+classifier = nn.Sequential(
+    nn.Dropout(0.5),                 # Regularization
+    nn.Linear(128 * 4 * 4, 512),     # Flattened features → 512
+    nn.ReLU(),
+    nn.Dropout(0.5),                 # Additional dropout
+    nn.Linear(512, num_classes)      # Final classification
+)
+```
+
+**Architecture Benefits:**
+- Efficient computation for mobile devices
+- Progressive feature extraction (32→64→128 channels)
+- Strong regularization with dual dropout
+- Adaptive pooling for input size flexibility
+- Memory-efficient design (~2M parameters)
+
+#### 3.8.2 Loss Function Implementation
+
+The system uses Label Smoothing Cross Entropy for more robust training:
+
+```python
+class LabelSmoothingCrossEntropy(nn.Module):
+    def __init__(self, smoothing=0.1):
+        super().__init__()
+        self.smoothing = smoothing
+        
+    def forward(self, pred, target):
+        log_prob = F.log_softmax(pred, dim=-1)
+        weight = pred.new_ones(pred.size()) * \
+                 self.smoothing / (pred.size(-1) - 1.)
+        weight.scatter_(-1, target.unsqueeze(-1), (1. - self.smoothing))
+        loss = (-weight * log_prob).sum(dim=-1).mean()
+        return loss
+```
+
+**Loss Function Benefits:**
+- Prevents overconfident predictions
+- Improves generalization
+- Smoothing factor = 0.1 (empirically determined)
+- Better calibrated confidence scores
+- Robust to label noise
+
+#### 3.8.3 Optimizer Configuration
+
+The system uses Adam optimizer with carefully tuned parameters:
+
+```python
+optimizer = optim.Adam(
+    model.parameters(),
+    lr=0.0001,           # Conservative learning rate
+    weight_decay=5e-4    # L2 regularization
+)
+```
+
+**Optimizer Benefits:**
+- Adaptive learning rates per parameter
+- Momentum-based updates
+- Built-in weight decay for regularization
+- Stable training dynamics
+- Fast convergence on biometric data
+
+**Learning Rate Schedule:**
+```python
+def lr_lambda(epoch):
+    if epoch < config['warmup_epochs']:
+        return epoch / config['warmup_epochs']
+    return 0.1 ** (epoch // config['pretrain_scheduler_step'])
+```
+
+**Schedule Benefits:**
+- Optional warmup period
+- Step decay every 20 epochs
+- 10x reduction per step
+- Prevents learning rate oscillation
+- Allows fine-grained parameter updates
+
+// ... existing code ...

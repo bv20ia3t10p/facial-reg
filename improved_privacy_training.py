@@ -52,7 +52,12 @@ logging.basicConfig(
 logger = logging.getLogger(__name__)
 
 def create_improved_config():
-    """Create enhanced training configuration optimized for CASIA-WebFace with stratified validation"""
+    """
+    Create enhanced training configuration optimized for CASIA-WebFace partitioned data
+    
+    Debugging Mode: Set local_epochs=1 for fast iterations
+    Production Mode: Set local_epochs=3-5 for better convergence
+    """
     # GPU-optimized batch sizes
     if torch.cuda.is_available():
         gpu_memory = torch.cuda.get_device_properties(0).total_memory / 1024**3
@@ -81,7 +86,7 @@ def create_improved_config():
         'val_split': 0.2,  # 20% for validation
         'stratify': True,  # Ensure balanced class distribution
         
-        # CASIA-WebFace optimized pre-training
+        # CASIA-WebFace partitioned data pre-training
         'pretrain_epochs': 1,  # Reduced to prevent overfitting
         'pretrain_lr': 0.0001,  # Much lower LR for CASIA-WebFace
         'pretrain_batch_size': pretrain_batch_size,
@@ -90,8 +95,10 @@ def create_improved_config():
         'warmup_epochs': 0,  # Add warmup period
         
         # Improved federated training phase
-        'federated_rounds': 1,
-        'local_epochs': 1,
+        'federated_rounds': 10,  # More rounds for better convergence
+        'local_epochs': 1,  # Default local epochs (fallback)
+        'server_local_epochs': 1,  # Server-specific: 1 epoch for fast debugging
+        'client_local_epochs': 1,  # Client-specific: 1 epoch for fast debugging
         'learning_rate': 0.0001,  # Lower LR for federated phase
         'batch_size': batch_size,
         'weight_decay': 5e-4,  # Stronger regularization for large dataset
@@ -99,12 +106,12 @@ def create_improved_config():
         # Enhanced privacy settings for employee biometric data
         'enable_differential_privacy_pretrain': False,  # Disabled for pretraining (internal data)
         'enable_differential_privacy_federated': True,  # Enabled for federated phase
-        'max_epsilon': 2.5,
+        'max_epsilon': 50.0,  # Much higher privacy budget for longer training
         'delta': 1e-5,
-        'noise_multiplier': 0.1,
+        'noise_multiplier': 0.05,  # Lower noise multiplier as requested
         'max_grad_norm': 1.0,  # Tighter clipping
         
-        # Training settings optimized for CASIA-WebFace
+        # Training settings optimized for partitioned facial data
         'patience': 100,  # Reduced patience to prevent overfitting
         'min_delta': 0.001,  # Larger improvement threshold
         'use_homomorphic_encryption': True,
@@ -112,7 +119,7 @@ def create_improved_config():
         'log_frequency': 50,  # Less frequent logging
         'early_stopping_metric': 'val_loss',  # Stop based on validation loss
         
-        # CASIA-WebFace specific settings
+        # Partitioned data specific settings
         'use_label_smoothing': True,
         'label_smoothing': 0.1,
         'use_mixup': False,  # Disable for now
@@ -241,7 +248,8 @@ def pretrain_server_model(config, data_loaders):
         batch_size=config['pretrain_batch_size'],
         shuffle=True,
         num_workers=2,
-        pin_memory=True if torch.cuda.is_available() else False
+        pin_memory=True if torch.cuda.is_available() else False,
+        drop_last=True  # Drop last incomplete batch to avoid BatchNorm issues
     )
     
     val_loader = DataLoader(
@@ -249,7 +257,8 @@ def pretrain_server_model(config, data_loaders):
         batch_size=config['pretrain_batch_size'],
         shuffle=False,
         num_workers=2,
-        pin_memory=True if torch.cuda.is_available() else False
+        pin_memory=True if torch.cuda.is_available() else False,
+        drop_last=True  # Drop last incomplete batch to avoid BatchNorm issues
     )
     
     # Training setup
@@ -307,6 +316,10 @@ def pretrain_server_model(config, data_loaders):
         total = 0
         
         for batch_idx, (data, targets) in enumerate(train_loader):
+            # Skip batch if size is 1 (BatchNorm requires batch_size > 1)
+            if data.size(0) == 1:
+                continue
+                
             data, targets = data.to(device), targets.to(device)
             
             optimizer.zero_grad()
@@ -341,6 +354,10 @@ def pretrain_server_model(config, data_loaders):
         
         with torch.no_grad():
             for data, targets in val_loader:
+                # Skip batch if size is 1 (BatchNorm requires batch_size > 1)
+                if data.size(0) == 1:
+                    continue
+                    
                 data, targets = data.to(device), targets.to(device)
                 outputs = model(data)
                 # Extract identity logits (first element of tuple)
@@ -481,7 +498,8 @@ def pretrain_client_models(config, data_loaders, server_model_state):
             batch_size=client_batch_size, 
             shuffle=True,
             num_workers=1,  # Reduce workers to save memory
-            pin_memory=False  # Disable pin_memory to save GPU memory
+            pin_memory=False,  # Disable pin_memory to save GPU memory
+            drop_last=True  # Drop last incomplete batch to avoid BatchNorm issues
         )
         
         # Get dataset size for split calculation
@@ -520,6 +538,10 @@ def pretrain_client_models(config, data_loaders, server_model_state):
             train_start_time = time.time()
             
             for batch_idx, (images, labels) in enumerate(client_data_loader):
+                # Skip batch if size is 1 (BatchNorm requires batch_size > 1)
+                if images.size(0) == 1:
+                    continue
+                
                 # Clear cache periodically
                 if batch_idx % 10 == 0 and torch.cuda.is_available():
                     torch.cuda.empty_cache()
@@ -541,9 +563,9 @@ def pretrain_client_models(config, data_loaders, server_model_state):
                 
                 # Metrics
                 running_loss += loss.item()
-                _, predicted = torch.max(identity_logits, 1)
-                total += identity_labels.size(0)
-                correct += (predicted == identity_labels).sum().item()
+            _, predicted = torch.max(identity_logits, 1)
+            total += identity_labels.size(0)
+            correct += (predicted == identity_labels).sum().item()
                 batch_count += 1
                 
                 # Batch logging (less frequent for clients)
@@ -572,6 +594,10 @@ def pretrain_client_models(config, data_loaders, server_model_state):
                 for batch_idx, (images, labels) in enumerate(client_data_loader):
                     if batch_idx >= val_batches:
                         break
+                    
+                    # Skip batch if size is 1 (BatchNorm requires batch_size > 1)
+                    if images.size(0) == 1:
+                        continue
                         
                     images = images.to(device, non_blocking=True)
                     identity_labels = labels.to(device, non_blocking=True)
@@ -636,7 +662,7 @@ def pretrain_client_models(config, data_loaders, server_model_state):
     return client_models
 
 def create_data_loaders(batch_size=16):
-    """Load real partitioned data using PyTorch ImageFolder"""
+    """Load real partitioned facial recognition data using PyTorch ImageFolder"""
     logger.info("📂 Loading real partitioned data using ImageFolder...")
     
     # Enhanced data preprocessing with augmentation for better generalization
@@ -656,7 +682,7 @@ def create_data_loaders(batch_size=16):
         transforms.Normalize(mean=[0.485, 0.456, 0.406], std=[0.229, 0.224, 0.225])
     ])
     
-    # Use training transform for now (K-fold will handle train/val split)
+    # Use training transform for now (stratified split will handle train/val split)
     transform = train_transform
     
     data_loaders = {}
@@ -721,7 +747,8 @@ def create_data_loaders(batch_size=16):
             batch_size=batch_size, 
             shuffle=True,
             num_workers=1,  # Reduced workers to save memory
-            pin_memory=False  # Disable pin_memory to prevent OOM
+            pin_memory=False,  # Disable pin_memory to prevent OOM
+            drop_last=True  # Drop last incomplete batch to avoid BatchNorm issues
         )
         
         # Statistics
@@ -738,8 +765,8 @@ def create_data_loaders(batch_size=16):
     return data_loaders, total_identities
 
 def run_improved_training(args):
-    """Run improved training with pre-training phase"""
-    logger.info("🚀 Starting Improved Privacy Training")
+    """Run improved privacy-preserving federated training with partitioned data"""
+    logger.info("🚀 Starting Privacy-Preserving Federated Training")
     
     # Setup
     results_dir = Path("improved_results")
@@ -759,14 +786,57 @@ def run_improved_training(args):
     logger.info(f"🔄 Updated config: num_identities = {total_identities}")
     
     # Phase 1a: Server Pre-training
-    server_model, server_best_acc = pretrain_server_model(config, data_loaders)
+    server_model_path = results_dir / "server_pretrained_model.pth"
+    if server_model_path.exists():
+        logger.info("🔄 Found existing server pre-trained model, loading...")
+        # Create model to load weights into
+        server_model = PrivacyBiometricModel(
+            num_identities=config['num_identities'],
+            privacy_enabled=False  # Pretraining without DP
+        )
+        server_model.load_state_dict(torch.load(server_model_path))
+        server_best_acc = 0.0  # We don't track this for existing models
+        logger.info("✅ Server pre-trained model loaded successfully")
+    else:
+        server_model, server_best_acc = pretrain_server_model(config, data_loaders)
+        # Save server pre-trained model
+        server_state = server_model.state_dict()
+        torch.save(server_state, server_model_path)
     
-    # Save server pre-trained model
     server_state = server_model.state_dict()
-    torch.save(server_state, results_dir / "server_pretrained_model.pth")
     
     # Phase 1b: Client Personalized Pre-training
-    client_models = pretrain_client_models(config, data_loaders, server_state)
+    client_model_paths = {
+        'client1': Path(f"best_client1_pretrained_model.pth"),
+        'client2': Path(f"best_client2_pretrained_model.pth")
+    }
+    
+    # Check if client models exist
+    existing_clients = {node_id: path.exists() for node_id, path in client_model_paths.items()}
+    logger.info(f"📋 Client model status: {existing_clients}")
+    
+    if all(existing_clients.values()):
+        logger.info("🔄 Found existing client pre-trained models, loading...")
+        client_models = {}
+        for node_id, path in client_model_paths.items():
+            try:
+                client_model = PrivacyBiometricModel(
+                    num_identities=config['num_identities'],
+                    privacy_enabled=False
+                )
+                client_model.load_state_dict(torch.load(path))
+                client_models[node_id] = client_model
+                logger.info(f"✅ {node_id} pre-trained model loaded successfully")
+            except Exception as e:
+                logger.error(f"❌ Failed to load {node_id} model: {e}")
+                # Fall back to training if loading fails
+                logger.info("🔧 Falling back to training client models...")
+                client_models = pretrain_client_models(config, data_loaders, server_state)
+                break
+    else:
+        missing_models = [node_id for node_id, exists in existing_clients.items() if not exists]
+        logger.info(f"🔧 Missing client models: {missing_models}. Training client models...")
+        client_models = pretrain_client_models(config, data_loaders, server_state)
     
     # Phase 2: Federated training
     logger.info("\n🔒 Phase 2: Privacy-Infused Federated Training")
@@ -781,7 +851,7 @@ def run_improved_training(args):
     trainer.global_model.load_state_dict(server_state)
     logger.info("✅ Initialized global model with server pre-trained weights")
     
-    for node_id, model in trainer.node_models.items():
+    for node_id, model in trainer.models.items():
         if node_id in client_models:
             # Use client-specific pretrained weights
             client_state = client_models[node_id].state_dict()
@@ -818,7 +888,7 @@ def run_improved_training(args):
     final_eval = trainer._evaluate_global_model()
     
     print("\n" + "="*80)
-    print("🎉 DISTRIBUTED FEDERATED TRAINING WITH 10-FOLD CV COMPLETED!")
+    print("🎉 PRIVACY-PRESERVING FEDERATED TRAINING COMPLETED!")
     print("="*80)
     print("📊 TRAINING PHASES SUMMARY:")
     print("="*80)
@@ -841,11 +911,11 @@ def run_improved_training(args):
         print(f"  {node_id}: {stats['epsilon_used']:.3f}/{config['max_epsilon']:.1f} ({usage:.1f}%)")
     
     print("="*80)
-    print("🎯 STRATIFIED VALIDATION BENEFITS:")
-    print("✅ Balanced class distribution in train/validation splits")
-    print("✅ More reliable model evaluation across all classes")
-    print("✅ Reduced variance in validation metrics")
-    print("✅ Better representation of model generalization")
+    print("🎯 REAL DATA PARTITIONED TRAINING BENEFITS:")
+    print("✅ Using actual CASIA-WebFace partitioned facial data")
+    print("✅ Server/Client data splits reflect real-world scenarios")
+    print("✅ ImageFolder provides efficient data loading")
+    print("✅ Stratified validation ensures balanced evaluation")
     print("")
     print("🎯 HYBRID PRIVACY APPROACH:")
     print("✅ Pretraining: DP disabled (internal employee data)")
@@ -863,7 +933,7 @@ def run_improved_training(args):
     return final_eval
 
 def main():
-    parser = argparse.ArgumentParser(description='Improved Privacy Training')
+    parser = argparse.ArgumentParser(description='Privacy-Preserving Federated Training with Partitioned Data')
     parser.add_argument('--pretrain_epochs', type=int, default=50)
     parser.add_argument('--federated_rounds', type=int, default=20)
     

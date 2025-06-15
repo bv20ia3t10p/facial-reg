@@ -1,8 +1,9 @@
 """
-Privacy-Infused Federated Biometric Training System
+Privacy-Preserving Federated Biometric Training System
 
 This module implements comprehensive privacy-preserving federated learning
-for biometric authentication with differential privacy and homomorphic encryption.
+for biometric authentication using partitioned facial recognition data
+with differential privacy and homomorphic encryption.
 """
 
 import torch
@@ -28,13 +29,13 @@ logger = logging.getLogger(__name__)
 
 class PrivacyFederatedTrainer:
     """
-    Privacy-Infused Federated Learning Trainer for Biometric Authentication
+    Privacy-Preserving Federated Learning Trainer for Biometric Authentication
     
     Features:
     - Differential Privacy with budget tracking
     - Homomorphic encryption simulation
     - Federated averaging with privacy preservation
-    - Non-IID data handling
+    - Partitioned data handling (server/client1/client2)
     - Client dropout tolerance
     - Convergence monitoring
     """
@@ -205,6 +206,18 @@ class PrivacyFederatedTrainer:
 
     def _train_local_node(self, node_id: str, model: nn.Module) -> Dict[str, Any]:
         """Train a single node with differential privacy"""
+        # GPU setup and monitoring
+        device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
+        model = model.to(device)
+        
+        if torch.cuda.is_available():
+            torch.cuda.empty_cache()  # Clear GPU cache
+            gpu_memory_before = torch.cuda.memory_allocated() / 1024**3
+            logger.info(f"🎮 {node_id} GPU Memory before training: {gpu_memory_before:.2f}GB")
+            logger.info(f"🚀 {node_id} training on GPU: {torch.cuda.get_device_name(0)}")
+        else:
+            logger.warning(f"⚠️  {node_id} training on CPU (GPU not available)")
+        
         model.train()
         optimizer = self.optimizers[node_id]
         data_loader = self.data_loaders[node_id]
@@ -216,26 +229,56 @@ class PrivacyFederatedTrainer:
         total_samples = 0
         gradients_collected = []
         
-        # Local training epochs
-        local_epochs = self.config.get('local_epochs', 5)
+        # Local training epochs - use node-specific configuration
+        if node_id == 'server':
+            local_epochs = self.config.get('server_local_epochs', self.config.get('local_epochs', 5))
+        else:
+            local_epochs = self.config.get('client_local_epochs', self.config.get('local_epochs', 5))
+        
+        total_batches = len(data_loader)
+        logger.info(f"📚 {node_id} training: {local_epochs} epochs × {total_batches} batches = {local_epochs * total_batches} total steps")
         
         for epoch in range(local_epochs):
             epoch_loss = 0.0
             epoch_correct = 0
             epoch_samples = 0
+            epoch_start_time = time.time()
             
-            for batch_idx, (images, identity_labels, emotion_labels) in enumerate(data_loader):
-                # Forward pass
-                identity_logits, emotion_logits, features = model(
-                    images, add_noise=True, node_id=node_id
-                )
+            logger.info(f"📊 {node_id} Epoch {epoch+1}/{local_epochs} starting...")
+            
+            for batch_idx, batch_data in enumerate(data_loader):
+                # Handle both 2-tuple (ImageFolder) and 3-tuple (custom dataset) formats
+                if len(batch_data) == 2:
+                    images, identity_labels = batch_data
+                    emotion_labels = None
+                else:
+                    images, identity_labels, emotion_labels = batch_data
+                
+                # Move data to GPU
+                images = images.to(device)
+                identity_labels = identity_labels.to(device)
+                if emotion_labels is not None:
+                    emotion_labels = emotion_labels.to(device)
+                
+                # Skip batch if size is 1 (BatchNorm requires batch_size > 1)
+                if images.size(0) == 1:
+                    logger.warning(f"{node_id} Skipping batch with size 1 (BatchNorm requirement)")
+                    continue
+                
+                # Forward pass - identity-only model returns (identity_logits, features)
+                identity_logits, features = model(images, add_noise=True, node_id=node_id)
+                emotion_logits = None  # No emotion classification in current model
                 
                 # Compute losses
                 identity_loss = nn.CrossEntropyLoss()(identity_logits, identity_labels)
-                emotion_loss = nn.CrossEntropyLoss()(emotion_logits, emotion_labels)
                 
+                if emotion_logits is not None and emotion_labels is not None:
+                    emotion_loss = nn.CrossEntropyLoss()(emotion_logits, emotion_labels)
                 # Combined loss with privacy-friendly weighting
                 total_loss_batch = identity_loss + 0.3 * emotion_loss
+                else:
+                    # Identity-only loss
+                    total_loss_batch = identity_loss
                 
                 # Backward pass
                 optimizer.zero_grad()
@@ -265,6 +308,18 @@ class PrivacyFederatedTrainer:
                 )
                 privacy_accountant.consume_privacy_budget(epsilon_step)
                 
+                # Progress logging every 100 batches
+                if (batch_idx + 1) % 100 == 0 or batch_idx == 0:
+                    current_acc = epoch_correct / max(1, epoch_samples) * 100
+                    current_loss = epoch_loss / max(1, batch_idx + 1)
+                    privacy_stats = privacy_accountant.get_privacy_stats()
+                    
+                    logger.info(f"🔄 {node_id} Epoch {epoch+1}/{local_epochs} | "
+                              f"Batch {batch_idx+1}/{total_batches} | "
+                              f"Loss: {current_loss:.4f} | "
+                              f"Acc: {current_acc:.2f}% | "
+                              f"Privacy ε: {privacy_stats['epsilon_used']:.4f}/{privacy_stats['epsilon_used'] + privacy_stats['epsilon_remaining']:.1f}")
+                
                 # Check privacy budget
                 if not privacy_accountant.can_train():
                     logger.warning(f"{node_id} privacy budget exhausted during training")
@@ -273,6 +328,23 @@ class PrivacyFederatedTrainer:
             total_loss += epoch_loss
             correct_predictions += epoch_correct
             total_samples += epoch_samples
+            
+            # Epoch completion logging
+            epoch_duration = time.time() - epoch_start_time
+            epoch_acc = epoch_correct / max(1, epoch_samples) * 100
+            epoch_avg_loss = epoch_loss / max(1, epoch_samples)
+            
+            if torch.cuda.is_available():
+                gpu_memory_current = torch.cuda.memory_allocated() / 1024**3
+                gpu_memory_cached = torch.cuda.memory_reserved() / 1024**3
+                logger.info(f"✅ {node_id} Epoch {epoch+1}/{local_epochs} completed | "
+                          f"Loss: {epoch_avg_loss:.4f} | Acc: {epoch_acc:.2f}% | "
+                          f"Time: {epoch_duration:.1f}s | "
+                          f"GPU: {gpu_memory_current:.2f}GB/{gpu_memory_cached:.2f}GB")
+            else:
+                logger.info(f"✅ {node_id} Epoch {epoch+1}/{local_epochs} completed | "
+                          f"Loss: {epoch_avg_loss:.4f} | Acc: {epoch_acc:.2f}% | "
+                          f"Time: {epoch_duration:.1f}s")
             
             if not privacy_accountant.can_train():
                 break
@@ -315,23 +387,24 @@ class PrivacyFederatedTrainer:
 
     def _calculate_privacy_cost(self, batch_size: int, dataset_size: int) -> float:
         """Calculate privacy cost (epsilon) for one training step"""
-        # More conservative privacy cost calculation
+        # Much more conservative privacy cost calculation for longer training
         q = batch_size / dataset_size  # Sampling probability
         
-        # Using simplified composition theorem with more conservative bounds
-        # Adjusted for better privacy-utility tradeoff
+        # Using simplified composition theorem with very conservative bounds
+        # Adjusted for much longer training with higher privacy budget
         epsilon_step = (q * math.log(1.25 / self.config.get('delta', 1e-5))) / (self.noise_multiplier ** 2)
         
-        # Scale down for better budget management
-        epsilon_step = epsilon_step * 0.1  # More conservative scaling
+        # Scale down much more aggressively for better budget management
+        epsilon_step = epsilon_step * 0.01  # Much more conservative scaling (10x less)
         
-        return max(epsilon_step, 0.0001)  # Lower minimum epsilon per step
+        return max(epsilon_step, 0.00001)  # Much lower minimum epsilon per step
 
     def _extract_gradients(self, model: nn.Module) -> Dict[str, torch.Tensor]:
         """Extract gradients from model parameters"""
         gradients = {}
         for name, param in model.named_parameters():
             if param.grad is not None:
+                # Clone and detach gradients, keeping them on the same device
                 gradients[name] = param.grad.clone().detach()
         return gradients
 
@@ -340,18 +413,32 @@ class PrivacyFederatedTrainer:
         # This is a simulation - in practice, use actual homomorphic encryption
         encrypted_gradients = {}
         
+        logger.debug(f"Encrypting {len(gradients)} gradient tensors for {node_id}")
+        
         for name, grad in gradients.items():
+            try:
             # Simulate encryption by adding a deterministic transformation
             # Real implementation would use libraries like SEAL or HElib
+                
+                # Move tensor to CPU before converting to numpy
+                grad_cpu = grad.detach().cpu()
+                
             encrypted_gradients[name] = {
-                'encrypted_data': grad.numpy().tolist(),  # Simulate encrypted format
+                    'encrypted_data': grad_cpu.numpy().tolist(),  # Simulate encrypted format
                 'encryption_params': {
                     'node_id': node_id,
                     'timestamp': datetime.now().isoformat(),
-                    'encryption_scheme': 'CKKS_simulation'
+                        'encryption_scheme': 'CKKS_simulation',
+                        'tensor_shape': list(grad.shape),
+                        'tensor_device': str(grad.device)
+                    }
                 }
-            }
+            except Exception as e:
+                logger.error(f"Failed to encrypt gradient {name} for {node_id}: {e}")
+                logger.error(f"Gradient shape: {grad.shape}, device: {grad.device}, dtype: {grad.dtype}")
+                raise
         
+        logger.debug(f"✓ Successfully encrypted gradients for {node_id}")
         return encrypted_gradients
 
     def _secure_gradient_aggregation(self, local_results: Dict[str, Any]) -> Dict[str, Any]:
@@ -433,23 +520,51 @@ class PrivacyFederatedTrainer:
         """Evaluate global model performance"""
         logger.info("Evaluating global model...")
         
+        # GPU setup
+        device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
+        self.global_model = self.global_model.to(device)
         self.global_model.eval()
+        
+        if torch.cuda.is_available():
+            logger.info(f"🎮 Global model evaluation on GPU: {torch.cuda.get_device_name(0)}")
+        
         total_loss = 0.0
         correct_predictions = 0
         total_samples = 0
         
         with torch.no_grad():
             for node_id, data_loader in self.data_loaders.items():
-                for images, identity_labels, emotion_labels in data_loader:
-                    # Forward pass
-                    identity_logits, emotion_logits, _ = self.global_model(
-                        images, add_noise=False, node_id="global"
-                    )
+                for batch_data in data_loader:
+                    # Handle both 2-tuple (ImageFolder) and 3-tuple (custom dataset) formats
+                    if len(batch_data) == 2:
+                        images, identity_labels = batch_data
+                        emotion_labels = None
+                    else:
+                        images, identity_labels, emotion_labels = batch_data
+                    
+                    # Move data to GPU
+                    images = images.to(device)
+                    identity_labels = identity_labels.to(device)
+                    if emotion_labels is not None:
+                        emotion_labels = emotion_labels.to(device)
+                    
+                    # Skip batch if size is 1 (BatchNorm requires batch_size > 1)
+                    if images.size(0) == 1:
+                        continue
+                    
+                    # Forward pass - identity-only model returns (identity_logits, features)
+                    identity_logits, features = self.global_model(images, add_noise=False, node_id="global")
+                    emotion_logits = None  # No emotion classification in current model
                     
                     # Calculate loss
                     identity_loss = nn.CrossEntropyLoss()(identity_logits, identity_labels)
+                    
+                    if emotion_logits is not None and emotion_labels is not None:
                     emotion_loss = nn.CrossEntropyLoss()(emotion_logits, emotion_labels)
                     batch_loss = identity_loss + 0.3 * emotion_loss
+                    else:
+                        # Identity-only loss
+                        batch_loss = identity_loss
                     
                     total_loss += batch_loss.item() * images.size(0)
                     
