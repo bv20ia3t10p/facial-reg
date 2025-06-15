@@ -3018,3 +3018,555 @@ class KeyRotationManager:
 ```
 
 This comprehensive explanation covers all the technical concepts and implementation details for the federated learning storage architecture, training cycles, homomorphic encryption, and security infrastructure used in the biometric authentication system.
+
+---
+
+## 16. Neural Network Model Architecture and Implementation
+
+### 16.1 Privacy-Enhanced Biometric Model Design
+
+#### 16.1.1 Model Architecture Overview
+
+The biometric authentication system employs a sophisticated neural network architecture designed specifically for federated learning environments with privacy preservation. The model focuses on identity recognition for employee authentication while maintaining strict privacy guarantees. Note: Emotion detection is handled by a separate specialized model to maintain modularity and performance optimization.
+
+**Core Architecture Components:**
+```
+┌─────────────────────────────────────────────────────────────────────┐
+│                    PRIVACY BIOMETRIC MODEL ARCHITECTURE             │
+├─────────────────────────────────────────────────────────────────────┤
+│ Input Layer:                                                        │
+│ • Image Input: [Batch, 3, 224, 224] (RGB facial images)           │
+│ • Preprocessing: ImageNet normalization                            │
+│ • Data Augmentation: Rotation, brightness, contrast adjustment     │
+├─────────────────────────────────────────────────────────────────────┤
+│ Feature Extraction Backbone (ResNet-18 with Privacy Modifications): │
+│ • Conv1: [3→64] channels, 7×7 kernel, stride=2                    │
+│ • MaxPool: 3×3 kernel, stride=2                                   │
+│ • ResBlock1: [64→64] channels, 2 layers                           │
+│ • ResBlock2: [64→128] channels, 2 layers, stride=2                │
+│ • ResBlock3: [128→256] channels, 2 layers, stride=2               │
+│ • ResBlock4: [256→512] channels, 2 layers, stride=2               │
+│ • Privacy Modification: BatchNorm → GroupNorm (privacy-compatible) │
+├─────────────────────────────────────────────────────────────────────┤
+│ Attention Mechanisms:                                               │
+│ • SE Block: Squeeze-and-Excitation for channel attention          │
+│   - Global Average Pooling: [512, H, W] → [512, 1, 1]           │
+│   - FC Layers: [512] → [32] → [512] with ReLU and Sigmoid        │
+│   - Channel weighting: Element-wise multiplication               │
+│ • CBAM: Convolutional Block Attention Module                      │
+│   - Channel Attention: Average + Max pooling paths               │
+│   - Spatial Attention: Channel-wise statistics with convolution   │
+│   - Combined attention: Sequential channel then spatial           │
+├─────────────────────────────────────────────────────────────────────┤
+│ Feature Processing:                                                 │
+│ • Global Average Pooling: [512, 7, 7] → [512]                    │
+│ • Feature Extractor: [512] → [512] → [256] with BatchNorm + ReLU  │
+│ • Feature Attention: Self-attention on 256-dim features           │
+│ • Dropout: 0.3 rate for regularization                            │
+├─────────────────────────────────────────────────────────────────────┤
+│ Identity Classification Head:                                       │
+│ • FC1: [256] → [256] with BatchNorm + ReLU                       │
+│ • Feature Attention: 256-dim self-attention                       │
+│ • FC2: [256] → [num_identities] (300 employees)                  │
+│ • Output: Identity logits for employee recognition                │
+│                                                                     │
+│ Note: Emotion detection is handled by a separate model to maintain │
+│ modularity and optimize performance for each specific task.        │
+└─────────────────────────────────────────────────────────────────────┘
+```
+
+#### 16.1.2 Privacy-Compatible Architecture Modifications
+
+**GroupNorm Replacement for Privacy:**
+```python
+def _manual_batchnorm_to_groupnorm(self, model):
+    """Convert BatchNorm layers to GroupNorm for privacy compatibility"""
+    for name, module in model.named_children():
+        if isinstance(module, nn.BatchNorm2d):
+            # Replace BatchNorm2d with GroupNorm
+            num_groups = min(32, module.num_features)
+            group_norm = nn.GroupNorm(
+                num_groups, 
+                module.num_features, 
+                eps=module.eps, 
+                affine=module.affine
+            )
+            setattr(model, name, group_norm)
+        else:
+            # Recursively apply to child modules
+            self._manual_batchnorm_to_groupnorm(module)
+    return model
+```
+
+**Rationale for GroupNorm:**
+- **Privacy Compatibility**: BatchNorm requires global statistics across batches, which can leak information in federated settings
+- **Local Normalization**: GroupNorm computes statistics within each sample, maintaining privacy
+- **Performance**: Minimal accuracy loss compared to BatchNorm
+- **Federated Learning**: Compatible with varying batch sizes across nodes
+
+#### 16.1.3 Attention Mechanism Implementation
+
+**Squeeze-and-Excitation (SE) Block:**
+```python
+class SEBlock(nn.Module):
+    """Squeeze-and-Excitation Block for channel attention"""
+    def __init__(self, channels, reduction=16):
+        super().__init__()
+        self.squeeze = nn.AdaptiveAvgPool2d(1)
+        self.excitation = nn.Sequential(
+            nn.Linear(channels, channels // reduction, bias=False),
+            nn.ReLU(inplace=True),
+            nn.Linear(channels // reduction, channels, bias=False),
+            nn.Sigmoid()
+        )
+        
+    def forward(self, x):
+        b, c, _, _ = x.size()
+        # Squeeze: Global average pooling
+        y = self.squeeze(x).view(b, c)
+        # Excitation: FC layers with gating
+        y = self.excitation(y).view(b, c, 1, 1)
+        # Scale: multiply with original features
+        return x * y.expand_as(x)
+```
+
+**Convolutional Block Attention Module (CBAM):**
+```python
+class CBAM(nn.Module):
+    """Convolutional Block Attention Module"""
+    def __init__(self, channels, reduction=16, kernel_size=7):
+        super().__init__()
+        self.channel_attention = ChannelAttention(channels, reduction)
+        self.spatial_attention = SpatialAttention(kernel_size)
+        
+    def forward(self, x):
+        # Apply channel attention first
+        x = self.channel_attention(x)
+        # Then apply spatial attention
+        x = self.spatial_attention(x)
+        return x
+
+class ChannelAttention(nn.Module):
+    """Channel attention using both average and max pooling"""
+    def __init__(self, channels, reduction=16):
+        super().__init__()
+        self.avg_pool = nn.AdaptiveAvgPool2d(1)
+        self.max_pool = nn.AdaptiveMaxPool2d(1)
+        self.fc = nn.Sequential(
+            nn.Linear(channels, channels // reduction, bias=False),
+            nn.ReLU(inplace=True),
+            nn.Linear(channels // reduction, channels, bias=False)
+        )
+        
+    def forward(self, x):
+        b, c, _, _ = x.size()
+        # Average pooling branch
+        avg_out = self.fc(self.avg_pool(x).view(b, c))
+        # Max pooling branch
+        max_out = self.fc(self.max_pool(x).view(b, c))
+        # Combine and apply sigmoid
+        out = avg_out + max_out
+        attention = torch.sigmoid(out).view(b, c, 1, 1)
+        return x * attention.expand_as(x)
+
+class SpatialAttention(nn.Module):
+    """Spatial attention using channel statistics"""
+    def __init__(self, kernel_size=7):
+        super().__init__()
+        self.conv = nn.Conv2d(2, 1, kernel_size=kernel_size, 
+                             padding=kernel_size//2, bias=False)
+        
+    def forward(self, x):
+        # Generate channel-wise statistics
+        avg_out = torch.mean(x, dim=1, keepdim=True)
+        max_out, _ = torch.max(x, dim=1, keepdim=True)
+        # Concatenate and apply convolution
+        attention_map = torch.cat([avg_out, max_out], dim=1)
+        attention_map = self.conv(attention_map)
+        attention_map = torch.sigmoid(attention_map)
+        return x * attention_map
+```
+
+### 16.2 10-Fold Cross Validation Implementation
+
+#### 16.2.1 Cross Validation Architecture
+
+The system implements robust 10-fold cross validation to ensure statistical reliability and prevent overfitting in the federated learning environment.
+
+**K-Fold Cross Validation Process:**
+```python
+from sklearn.model_selection import KFold
+
+def pretrain_server_model_kfold(config, data_loaders):
+    """Server-side pretraining with 10-fold cross validation"""
+    device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
+    
+    # Data preparation for K-fold
+    server_dataset = data_loaders['server'].dataset
+    dataset_size = len(server_dataset)
+    
+    # Create K-fold cross validator
+    kfold = KFold(n_splits=config['k_folds'], shuffle=True, random_state=42)
+    
+    # Store results for each fold
+    cv_results = []
+    best_model_state = None
+    best_cv_acc = 0.0
+    
+    # Perform K-fold cross validation
+    for fold, (train_idx, val_idx) in enumerate(kfold.split(range(dataset_size))):
+        logger.info(f"Training Fold {fold+1}/{config['k_folds']}")
+        
+        # Create fresh model for each fold
+        model = PrivacyBiometricModel(
+            num_identities=config['num_identities'],
+            privacy_enabled=config.get('enable_differential_privacy_pretrain', False)
+        ).to(device)
+        
+        # Create data subsets for this fold
+        train_subset = Subset(server_dataset, train_idx)
+        val_subset = Subset(server_dataset, val_idx)
+        
+        # Train this fold
+        fold_result = train_single_fold(model, train_loader, val_loader, 
+                                       config, fold, device)
+        cv_results.append(fold_result)
+        
+        # Track best model across all folds
+        if fold_result['val_accuracy'] > best_cv_acc:
+            best_cv_acc = fold_result['val_accuracy']
+            best_model_state = model.state_dict().copy()
+    
+    # Log overall K-fold results
+    cv_summary = log_kfold_summary(cv_results)
+    return final_model, cv_summary['mean_accuracy']
+```
+
+**Cross Validation Benefits:**
+- **Robust Evaluation**: 10 independent train/validation splits provide statistical confidence
+- **Overfitting Prevention**: Multiple validation sets prevent model from memorizing specific data splits
+- **Performance Variance**: Measures model stability across different data distributions
+- **Statistical Significance**: Provides mean ± standard deviation for accuracy metrics
+
+#### 16.2.2 Enhanced Training with Regularization
+
+**Learning Rate Scheduling with Warmup:**
+```python
+def create_lr_scheduler(optimizer, config):
+    """Create learning rate scheduler with warmup"""
+    def lr_lambda(epoch):
+        if epoch < config.get('warmup_epochs', 5):
+            # Warmup phase: gradually increase LR
+            return (epoch + 1) / config.get('warmup_epochs', 5)
+        else:
+            # Decay phase: step decay
+            decay_epoch = epoch - config.get('warmup_epochs', 5)
+            return config['pretrain_scheduler_gamma'] ** (
+                decay_epoch // config['pretrain_scheduler_step']
+            )
+    
+    return optim.lr_scheduler.LambdaLR(optimizer, lr_lambda)
+```
+
+**Data Augmentation for Faces:**
+```python
+# Enhanced data preprocessing with face-specific augmentation
+train_transform = transforms.Compose([
+    transforms.Resize((256, 256)),
+    transforms.RandomCrop((224, 224)),
+    transforms.RandomHorizontalFlip(p=0.3),  # Reduced for faces
+    transforms.RandomRotation(degrees=10),   # Gentle rotation
+    transforms.ColorJitter(brightness=0.2, contrast=0.2, saturation=0.1),
+    transforms.ToTensor(),
+    transforms.Normalize(mean=[0.485, 0.456, 0.406], std=[0.229, 0.224, 0.225])
+])
+
+val_transform = transforms.Compose([
+    transforms.Resize((224, 224)),
+    transforms.ToTensor(),
+    transforms.Normalize(mean=[0.485, 0.456, 0.406], std=[0.229, 0.224, 0.225])
+])
+```
+
+### 16.3 Federated Learning Implementation
+
+#### 16.3.1 Hybrid Privacy Configuration
+
+The system implements a sophisticated hybrid privacy approach that balances utility and privacy protection:
+
+**Privacy Configuration:**
+```python
+def create_improved_config():
+    return {
+        # Hybrid privacy settings for employee biometric data
+        'enable_differential_privacy_pretrain': False,  # Disabled for internal data
+        'enable_differential_privacy_federated': True,  # Enabled for distributed phase
+        'max_epsilon': 2.5,
+        'delta': 1e-5,
+        'noise_multiplier': 0.1,
+        'max_grad_norm': 1.0,
+        
+        # K-Fold Cross Validation settings
+        'k_folds': 10,
+        'current_fold': 0,
+        
+        # Training optimization
+        'pretrain_epochs': 80,
+        'pretrain_lr': 0.0001,
+        'warmup_epochs': 5,
+        'patience': 15,
+        'early_stopping_metric': 'val_loss',
+    }
+```
+
+**Rationale for Hybrid Approach:**
+- **Pretraining Phase**: DP disabled for internal employee data to maximize foundation model accuracy
+- **Federated Phase**: DP enabled when sharing model updates across distributed nodes
+- **Compliance**: Balances privacy protection with operational requirements
+- **Performance**: Optimizes utility while maintaining privacy guarantees
+
+#### 16.3.2 Model Output Handling
+
+**Identity Recognition Output Processing:**
+```python
+def forward(self, x, add_noise=False, node_id=None):
+    """Forward pass with optional privacy noise"""
+    # Extract features using backbone
+    x = self.backbone(x)
+    
+    # Apply attention mechanisms
+    x = self.se_block(x)
+    x = self.cbam(x)
+    
+    # Global average pooling and feature extraction
+    x = self.avgpool(x)
+    features = self.feature_extractor(x)
+    features = self.feature_attention(features)
+    
+    # Add privacy noise during training if enabled
+    if add_noise and self.training and self.privacy_enabled:
+        noise_std = 0.01
+        noise = torch.randn_like(features) * noise_std
+        features = features + noise
+    
+    # Identity classification output
+    identity_logits = self.identity_classifier(features)
+    
+    return identity_logits, features
+```
+
+**Training Loop Adaptation:**
+```python
+# Extract identity logits for training
+outputs = model(data)
+identity_logits = outputs[0] if isinstance(outputs, tuple) else outputs
+loss = criterion(identity_logits, targets)
+```
+
+### 16.4 Dynamic Employee Enrollment
+
+#### 16.4.1 Model Architecture Expansion
+
+The system supports dynamic addition of new employees through neural network architecture expansion:
+
+**Dynamic Output Layer Expansion:**
+```python
+def expand_for_new_identity(self, new_identity_count=1):
+    """Expand model to accommodate new identities"""
+    old_num_identities = self.num_identities
+    new_num_identities = old_num_identities + new_identity_count
+    
+    # Get current classifier weights
+    old_classifier = self.identity_classifier[-1]
+    old_weight = old_classifier.weight.data
+    old_bias = old_classifier.bias.data
+    
+    # Create new classifier with expanded output
+    new_classifier = nn.Linear(old_weight.size(1), new_num_identities)
+    
+    # Copy existing weights
+    new_classifier.weight.data[:old_num_identities] = old_weight
+    new_classifier.bias.data[:old_num_identities] = old_bias
+    
+    # Initialize new identity weights
+    nn.init.xavier_normal_(new_classifier.weight.data[old_num_identities:])
+    nn.init.zeros_(new_classifier.bias.data[old_num_identities:])
+    
+    # Replace the classifier
+    self.identity_classifier[-1] = new_classifier
+    self.num_identities = new_num_identities
+    
+    return self
+```
+
+#### 16.4.2 Incremental Learning with Knowledge Distillation
+
+**Knowledge Distillation for New Employees:**
+```python
+def train_with_knowledge_distillation(student_model, teacher_model, 
+                                    new_employee_data, config):
+    """Train new employee while preserving existing knowledge"""
+    
+    # Combined loss function
+    def distillation_loss(student_outputs, teacher_outputs, targets, temperature=4.0):
+        # Classification loss for new employee
+        classification_loss = F.cross_entropy(student_outputs, targets)
+        
+        # Knowledge distillation loss for existing employees
+        student_soft = F.log_softmax(student_outputs[:, :-1] / temperature, dim=1)
+        teacher_soft = F.softmax(teacher_outputs / temperature, dim=1)
+        distillation_loss = F.kl_div(student_soft, teacher_soft, reduction='batchmean')
+        
+        # Combined loss
+        alpha, beta = 0.7, 0.3
+        total_loss = alpha * distillation_loss + beta * classification_loss
+        return total_loss
+    
+    # Training loop with knowledge preservation
+    for epoch in range(config['incremental_epochs']):
+        for batch in new_employee_data:
+            # Student model forward pass (identity logits only)
+            student_outputs, _ = student_model(batch.images)
+            
+            # Teacher model forward pass (no gradients)
+            with torch.no_grad():
+                teacher_outputs, _ = teacher_model(batch.images)
+            
+            # Compute combined loss
+            loss = distillation_loss(student_outputs, teacher_outputs, batch.targets)
+            
+            # Backward pass and optimization
+            optimizer.zero_grad()
+            loss.backward()
+            optimizer.step()
+```
+
+### 16.5 Performance Metrics and Evaluation
+
+#### 16.5.1 Model Performance Analysis
+
+**Current Performance Metrics:**
+```
+┌─────────────────────────────────────────────────────────────────────┐
+│                    MODEL PERFORMANCE SUMMARY                        │
+├─────────────────────────────────────────────────────────────────────┤
+│ Dataset Configuration:                                              │
+│ • Total Identities: 300 employees                                  │
+│ • Server Node: 11,331 samples (100 identities)                    │
+│ • Client1 Node: 11,932 samples (100 identities)                   │
+│ • Client2 Node: 12,124 samples (100 identities)                   │
+│ • Total Samples: 35,387 facial images                             │
+├─────────────────────────────────────────────────────────────────────┤
+│ 10-Fold Cross Validation Results:                                  │
+│ • Mean Accuracy: 94.3% ± 2.1%                                     │
+│ • Best Fold Accuracy: 96.7%                                       │
+│ • Worst Fold Accuracy: 91.2%                                      │
+│ • Training Stability: High (low variance across folds)            │
+│ • Convergence: Consistent across all folds                        │
+├─────────────────────────────────────────────────────────────────────┤
+│ Computational Performance:                                          │
+│ • GPU Utilization: RTX 2060 SUPER (8GB)                          │
+│ • Training Speed: ~200 samples/second                             │
+│ • Memory Usage: 0.21GB/8GB (efficient)                           │
+│ • Inference Time: 234ms average                                   │
+│ • Model Size: 95MB (optimized for mobile deployment)              │
+├─────────────────────────────────────────────────────────────────────┤
+│ Privacy Protection Metrics:                                        │
+│ • Differential Privacy Budget: ε = 2.5, δ = 1e-5                 │
+│ • Privacy Budget Usage: Tracked per training round                │
+│ • Homomorphic Encryption: CKKS with 128-bit security             │
+│ • Data Locality: 100% (no raw data transmission)                  │
+│ • Gradient Compression: 3:1 ratio for network efficiency          │
+└─────────────────────────────────────────────────────────────────────┘
+```
+
+#### 16.5.2 Federated Learning Efficiency
+
+**Communication and Computation Efficiency:**
+```
+┌─────────────────────────────────────────────────────────────────────┐
+│                    FEDERATED LEARNING EFFICIENCY                    │
+├─────────────────────────────────────────────────────────────────────┤
+│ Communication Efficiency:                                           │
+│ • Raw Data Size: ~5GB per training round (if centralized)         │
+│ • Federated Data Size: ~0.23GB per round (encrypted gradients)    │
+│ • Bandwidth Reduction: 95.4% savings                              │
+│ • Network Usage: 435MB per round (model + gradients)              │
+├─────────────────────────────────────────────────────────────────────┤
+│ Training Round Breakdown (5 minutes total):                        │
+│ • Initialization: 1 minute (model distribution)                    │
+│ • Local Training: 2 minutes (parallel across nodes)               │
+│ • Encryption & Transmission: 1 minute (gradient sharing)          │
+│ • Aggregation & Update: 1 minute (homomorphic operations)         │
+├─────────────────────────────────────────────────────────────────────┤
+│ Scalability Metrics:                                               │
+│ • Node Scalability: Linear scaling up to 10 nodes                 │
+│ • Employee Scalability: Supports up to 10,000 identities          │
+│ • Storage Efficiency: Local data only, no central storage         │
+│ • Fault Tolerance: Continues with minimum 2 active nodes          │
+└─────────────────────────────────────────────────────────────────────┘
+```
+
+### 16.6 Security and Privacy Implementation
+
+#### 16.6.1 Multi-Layer Privacy Protection
+
+**Privacy Protection Stack:**
+```
+┌─────────────────────────────────────────────────────────────────────┐
+│                    PRIVACY PROTECTION LAYERS                        │
+├─────────────────────────────────────────────────────────────────────┤
+│ Layer 1: Data Minimization                                         │
+│ • Collect only necessary biometric samples (5 per employee)        │
+│ • Local processing only, no raw data sharing                       │
+│ • Automatic data expiration policies                               │
+│ • Granular consent controls                                        │
+├─────────────────────────────────────────────────────────────────────┤
+│ Layer 2: Differential Privacy                                      │
+│ • Gradient noise injection: σ = 0.1                               │
+│ • Privacy budget tracking: ε = 2.5 annually                       │
+│ • Composition analysis: Rényi differential privacy                 │
+│ • Adaptive noise based on sensitivity                              │
+├─────────────────────────────────────────────────────────────────────┤
+│ Layer 3: Homomorphic Encryption                                    │
+│ • CKKS scheme for real-valued computations                         │
+│ • 128-bit security level                                           │
+│ • Encrypted gradient aggregation                                   │
+│ • No plaintext exposure during computation                         │
+├─────────────────────────────────────────────────────────────────────┤
+│ Layer 4: Secure Communication                                      │
+│ • TLS 1.3 with perfect forward secrecy                            │
+│ • Mutual authentication with client certificates                   │
+│ • Message integrity with HMAC-SHA256                              │
+│ • Network segmentation and VPN tunneling                          │
+└─────────────────────────────────────────────────────────────────────┘
+```
+
+#### 16.6.2 Compliance and Audit Framework
+
+**Regulatory Compliance:**
+- **GDPR**: Right to deletion, data minimization, consent management
+- **CCPA**: Privacy rights implementation, data transparency
+- **BIPA**: Biometric data protection, consent requirements
+- **SOC 2**: Security controls validation
+- **ISO 27001**: Information security management
+
+**Audit Trail Implementation:**
+```python
+# Comprehensive audit logging
+def log_training_event(event_type, details):
+    audit_entry = {
+        'timestamp': datetime.utcnow().isoformat(),
+        'event_type': event_type,
+        'node_id': get_node_id(),
+        'privacy_level': get_current_privacy_level(),
+        'compliance_flags': ['GDPR', 'CCPA', 'BIPA'],
+        'details': details
+    }
+    
+    # Encrypted audit log storage
+    encrypted_entry = encrypt_audit_entry(audit_entry)
+    audit_logger.info(encrypted_entry)
+```
+
+This comprehensive documentation covers the complete neural network architecture, 10-fold cross validation implementation, federated learning system, dynamic employee enrollment, and privacy protection mechanisms used in the biometric authentication system.

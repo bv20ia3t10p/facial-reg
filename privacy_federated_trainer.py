@@ -68,7 +68,7 @@ class PrivacyFederatedTrainer:
         
         for node_id in data_loaders.keys():
             self.models[node_id] = self.model_manager.create_node_model(
-                node_id, privacy_enabled=True
+                node_id, privacy_enabled=config.get('enable_differential_privacy_federated', True)
             )
             
             # Initialize optimizer with privacy-friendly settings
@@ -86,6 +86,8 @@ class PrivacyFederatedTrainer:
         
         # Create global model
         self.global_model = self.model_manager.create_global_model()
+        # Update global model privacy setting
+        self.global_model.privacy_enabled = config.get('enable_differential_privacy_federated', True)
         
         # Training state
         self.current_round = 0
@@ -706,13 +708,14 @@ class ConvergenceMonitor:
 
 
 class BiometricDataset(Dataset):
-    """Custom dataset for biometric data with identity and emotion labels"""
+    """Custom dataset for biometric data with identity labels (emotion labels optional)"""
     
-    def __init__(self, images: List, identity_labels: List, emotion_labels: List, transform=None):
+    def __init__(self, images: List, identity_labels: List, emotion_labels: List = None, transform=None):
         self.images = images
         self.identity_labels = identity_labels
         self.emotion_labels = emotion_labels
         self.transform = transform
+        self.identity_only = emotion_labels is None
         
     def __len__(self):
         return len(self.images)
@@ -720,11 +723,14 @@ class BiometricDataset(Dataset):
     def __getitem__(self, idx):
         image = self.images[idx]
         identity_label = self.identity_labels[idx]
-        emotion_label = self.emotion_labels[idx]
         
         if self.transform:
             image = self.transform(image)
             
+        if self.identity_only:
+            return image, identity_label
+        else:
+            emotion_label = self.emotion_labels[idx]
         return image, identity_label, emotion_label
 
 

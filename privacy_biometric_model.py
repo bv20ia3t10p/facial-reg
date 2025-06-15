@@ -1,61 +1,160 @@
 """
 Privacy-Enabled Biometric Model for Federated Learning
-Designed for 300 identities (100 per node) with emotion detection
+Designed for identity recognition in federated biometric authentication
 """
 
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
-from torchvision.models import resnet50
+from torchvision.models import resnet18
 from typing import Tuple, Optional, Dict
 import math
+
+class SEBlock(nn.Module):
+    """Squeeze-and-Excitation Block"""
+    def __init__(self, channels, reduction=16):
+        super().__init__()
+        self.squeeze = nn.AdaptiveAvgPool2d(1)
+        self.excitation = nn.Sequential(
+            nn.Linear(channels, channels // reduction, bias=False),
+            nn.ReLU(inplace=True),
+            nn.Linear(channels // reduction, channels, bias=False),
+            nn.Sigmoid()
+        )
+        
+    def forward(self, x):
+        b, c, _, _ = x.size()
+        # Squeeze: Global average pooling
+        y = self.squeeze(x).view(b, c)
+        # Excitation: FC layers
+        y = self.excitation(y).view(b, c, 1, 1)
+        # Scale: multiply with original features
+        return x * y.expand_as(x)
+
+class ChannelAttention(nn.Module):
+    """Channel Attention Module from CBAM"""
+    def __init__(self, channels, reduction=16):
+        super().__init__()
+        self.avg_pool = nn.AdaptiveAvgPool2d(1)
+        self.max_pool = nn.AdaptiveMaxPool2d(1)
+        
+        self.fc = nn.Sequential(
+            nn.Linear(channels, channels // reduction, bias=False),
+            nn.ReLU(inplace=True),
+            nn.Linear(channels // reduction, channels, bias=False)
+        )
+        
+    def forward(self, x):
+        b, c, _, _ = x.size()
+        
+        # Average pooling branch
+        avg_out = self.fc(self.avg_pool(x).view(b, c))
+        # Max pooling branch
+        max_out = self.fc(self.max_pool(x).view(b, c))
+        
+        # Combine and apply sigmoid
+        out = avg_out + max_out
+        attention = torch.sigmoid(out).view(b, c, 1, 1)
+        return x * attention.expand_as(x)
+
+class SpatialAttention(nn.Module):
+    """Spatial Attention Module from CBAM"""
+    def __init__(self, kernel_size=7):
+        super().__init__()
+        self.conv = nn.Conv2d(2, 1, kernel_size=kernel_size, padding=kernel_size//2, bias=False)
+        
+    def forward(self, x):
+        # Generate channel-wise statistics
+        avg_out = torch.mean(x, dim=1, keepdim=True)
+        max_out, _ = torch.max(x, dim=1, keepdim=True)
+        
+        # Concatenate and apply convolution
+        attention_map = torch.cat([avg_out, max_out], dim=1)
+        attention_map = self.conv(attention_map)
+        attention_map = torch.sigmoid(attention_map)
+        
+        return x * attention_map
+
+class CBAM(nn.Module):
+    """Convolutional Block Attention Module"""
+    def __init__(self, channels, reduction=16, kernel_size=7):
+        super().__init__()
+        self.channel_attention = ChannelAttention(channels, reduction)
+        self.spatial_attention = SpatialAttention(kernel_size)
+        
+    def forward(self, x):
+        # Apply channel attention first
+        x = self.channel_attention(x)
+        # Then apply spatial attention
+        x = self.spatial_attention(x)
+        return x
+
+class FeatureAttention(nn.Module):
+    """Feature-level attention for 1D vectors"""
+    def __init__(self, in_dim, reduction=4):
+        super().__init__()
+        self.attention = nn.Sequential(
+            nn.Linear(in_dim, in_dim // reduction),
+            nn.ReLU(inplace=True),
+            nn.Linear(in_dim // reduction, in_dim),
+            nn.Sigmoid()
+        )
+        
+    def forward(self, x):
+        # Generate attention weights
+        attention_weights = self.attention(x)
+        # Apply attention with residual connection
+        return x * attention_weights + x
 
 class PrivacyBiometricModel(nn.Module):
     """
     Privacy-compatible biometric model for federated learning
-    Supports both identity recognition and emotion detection
+    Supports identity recognition for employee authentication
     """
     
     def __init__(self, 
-                 num_identities: int = 300,
-                 num_emotions: int = 7,
+                 num_identities: int = 50,
                  feature_dim: int = 512,
                  privacy_enabled: bool = True,
-                 dropout_rate: float = 0.1):
+                 dropout_rate: float = 0.3):
         super().__init__()
         
         self.num_identities = num_identities
-        self.num_emotions = num_emotions
         self.feature_dim = feature_dim
         self.privacy_enabled = privacy_enabled
         
-        # Build privacy-compatible backbone
-        self.backbone = self._build_privacy_backbone()
+        # Build privacy-compatible backbone (excluding final avgpool and fc)
+        backbone = resnet18(pretrained=True)
+        backbone = self._manual_batchnorm_to_groupnorm(backbone)
+        self.backbone = nn.Sequential(*list(backbone.children())[:-2])  # Remove avgpool and fc
         
-        # Feature extraction layers
+        # Add SE block after backbone
+        self.se_block = SEBlock(512, reduction=8)
+        
+        # Add CBAM after SE block
+        self.cbam = CBAM(512, reduction=8, kernel_size=7)
+        
+        # Global average pooling and feature extraction
+        self.avgpool = nn.AdaptiveAvgPool2d((1, 1))
         self.feature_extractor = nn.Sequential(
-            nn.Linear(2048, feature_dim),
-            nn.LayerNorm(feature_dim),
+            nn.Flatten(),
+            nn.Linear(512, feature_dim),
+            nn.BatchNorm1d(feature_dim),
             nn.ReLU(inplace=True),
             nn.Dropout(dropout_rate)
         )
         
-        # Identity classification head
-        self.identity_classifier = nn.Sequential(
-            nn.Linear(feature_dim, feature_dim // 2),
-            nn.LayerNorm(feature_dim // 2),
-            nn.ReLU(inplace=True),
-            nn.Dropout(dropout_rate),
-            nn.Linear(feature_dim // 2, num_identities)
-        )
+        # Add feature-level attention
+        self.feature_attention = FeatureAttention(feature_dim, reduction=8)
         
-        # Emotion classification head
-        self.emotion_classifier = nn.Sequential(
-            nn.Linear(feature_dim, feature_dim // 4),
-            nn.LayerNorm(feature_dim // 4),
+        # Identity classification head with attention
+        self.identity_classifier = nn.Sequential(
+            nn.Linear(feature_dim, feature_dim),
+            nn.BatchNorm1d(feature_dim),
             nn.ReLU(inplace=True),
             nn.Dropout(dropout_rate),
-            nn.Linear(feature_dim // 4, num_emotions)
+            FeatureAttention(feature_dim, reduction=8),
+            nn.Linear(feature_dim, num_identities)
         )
         
         # Privacy-specific components
@@ -65,33 +164,15 @@ class PrivacyBiometricModel(nn.Module):
         # Initialize weights
         self._initialize_weights()
     
-    def _build_privacy_backbone(self):
-        """Build ResNet50 backbone compatible with differential privacy"""
-        backbone = resnet50(pretrained=True)
-        
-        # Convert BatchNorm to GroupNorm for privacy compatibility
-        # Note: Opacus 1.5.4 doesn't have convert_batchnorm_modules, so we use manual conversion
-        backbone = self._manual_batchnorm_to_groupnorm(backbone)
-        print("✅ Successfully converted BatchNorm to GroupNorm for privacy compatibility")
-        
-        # Remove the final classification layer
-        backbone.fc = nn.Identity()
-        
-        return backbone
-    
     def _manual_batchnorm_to_groupnorm(self, model):
         """Manually convert BatchNorm layers to GroupNorm for privacy compatibility"""
         for name, module in model.named_children():
             if isinstance(module, nn.BatchNorm2d):
                 # Replace BatchNorm2d with GroupNorm
-                num_groups = min(32, module.num_features)  # Use 32 groups or fewer if needed
+                num_groups = min(32, module.num_features)
                 group_norm = nn.GroupNorm(num_groups, module.num_features, 
                                         eps=module.eps, affine=module.affine)
                 setattr(model, name, group_norm)
-            elif isinstance(module, nn.BatchNorm1d):
-                # Replace BatchNorm1d with LayerNorm for 1D case
-                layer_norm = nn.LayerNorm(module.num_features, eps=module.eps)
-                setattr(model, name, layer_norm)
             else:
                 # Recursively apply to child modules
                 self._manual_batchnorm_to_groupnorm(module)
@@ -116,13 +197,23 @@ class PrivacyBiometricModel(nn.Module):
     def forward(self, 
                 x: torch.Tensor, 
                 add_noise: bool = False,
-                node_id: Optional[str] = None) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
+                node_id: Optional[str] = None) -> Tuple[torch.Tensor, torch.Tensor]:
         """Forward pass with optional privacy noise"""
-        # Extract features using backbone
-        backbone_features = self.backbone(x)
+        # Extract features using backbone (output is [B, 512, H, W])
+        x = self.backbone(x)
         
-        # Feature extraction
-        features = self.feature_extractor(backbone_features)
+        # Apply SE block for channel attention
+        x = self.se_block(x)
+        
+        # Apply CBAM for comprehensive attention
+        x = self.cbam(x)
+        
+        # Global average pooling
+        x = self.avgpool(x)
+        
+        # Feature extraction and attention
+        features = self.feature_extractor(x)
+        features = self.feature_attention(features)
         
         # Add privacy noise during training if enabled
         if add_noise and self.training and self.privacy_enabled:
@@ -133,10 +224,7 @@ class PrivacyBiometricModel(nn.Module):
         # Identity classification
         identity_logits = self.identity_classifier(features)
         
-        # Emotion classification
-        emotion_logits = self.emotion_classifier(features)
-        
-        return identity_logits, emotion_logits, features
+        return identity_logits, features
     
     def get_feature_embeddings(self, x: torch.Tensor) -> torch.Tensor:
         """Extract feature embeddings without classification"""
@@ -180,7 +268,6 @@ class PrivacyBiometricModel(nn.Module):
         
         return {
             "num_identities": self.num_identities,
-            "num_emotions": self.num_emotions,
             "feature_dim": self.feature_dim,
             "total_parameters": total_params,
             "trainable_parameters": trainable_params,
