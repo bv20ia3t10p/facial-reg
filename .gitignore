@@ -4,3 +4,5 @@ __pycache__
 *.pth
 *history.json
 *.log
+.vscode/
+.monitoring/
