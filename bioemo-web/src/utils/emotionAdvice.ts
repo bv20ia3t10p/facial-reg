@@ -8,77 +8,115 @@ interface EmotionAdvice {
 
 const emotionAdviceMap: Record<string, EmotionAdvice> = {
   happiness: {
-    title: 'Keep up the positive energy!',
-    description: 'Your positive emotional state contributes to a better work environment.',
+    title: 'Thriving at Work! 🌟',
+    description: 'Your positive emotional state is a valuable asset to the team. Use this energy to boost productivity and inspire others.',
     suggestions: [
-      'Share your positive energy with colleagues',
-      'Take on new challenges while in this positive mindset',
-      'Document your achievements and progress',
+      'Take on challenging projects that require creativity and innovation',
+      'Mentor or support team members who might benefit from your positive energy',
+      'Document your successful strategies for future reference',
+      'Set ambitious goals while maintaining this positive momentum',
+      'Share your achievements and celebrate team successes'
     ],
   },
   neutral: {
-    title: 'Maintaining Balance',
-    description: 'You\'re in a balanced emotional state, which is great for focused work.',
+    title: 'Balanced and Focused 🎯',
+    description: 'Your balanced state is ideal for analytical tasks and strategic thinking. Make the most of this clear-headed mindset.',
     suggestions: [
-      'Use this balanced state for complex problem-solving',
-      'Plan your upcoming tasks and priorities',
-      'Consider learning something new',
+      'Tackle complex problems that require careful analysis',
+      'Review and optimize your work processes',
+      'Plan upcoming projects and set clear milestones',
+      'Engage in strategic discussions with team members',
+      'Update your skills through focused learning sessions'
     ],
   },
   sadness: {
-    title: 'Taking Care of Your Wellbeing',
-    description: 'It\'s okay to feel down sometimes. Consider taking steps to lift your mood.',
+    title: 'Taking Care of Your Wellbeing 💙',
+    description: 'Everyone experiences down moments. Let\'s focus on self-care and gradual improvement while maintaining professional responsibilities.',
     suggestions: [
-      'Take short breaks to refresh your mind',
-      'Connect with supportive colleagues',
-      'Focus on manageable tasks to build momentum',
+      'Break your workday into smaller, manageable chunks',
+      'Schedule a casual chat with a trusted colleague or mentor',
+      'Take regular short breaks for physical movement or fresh air',
+      'Focus on tasks that give you a sense of accomplishment',
+      'Consider speaking with HR about wellness resources'
     ],
   },
   anger: {
-    title: 'Managing Stress',
-    description: 'Let\'s channel this energy constructively.',
+    title: 'Channeling Energy Productively ⚡',
+    description: 'Strong emotions can be transformed into productive action. Let\'s focus on constructive solutions and professional growth.',
     suggestions: [
-      'Take a brief walk or breathing exercise',
-      'Write down your concerns to address them systematically',
-      'Consider discussing issues with your supervisor or HR',
+      'Take a 5-minute mindfulness break to center yourself',
+      'Document your concerns clearly and objectively',
+      'Schedule a structured discussion with relevant stakeholders',
+      'Focus on process improvements that could prevent future issues',
+      'Engage in physical activity during your break to release tension'
     ],
   },
   fear: {
-    title: 'Building Confidence',
-    description: 'Let\'s work on addressing your concerns.',
+    title: 'Building Confidence and Clarity 🌅',
+    description: 'Uncertainty is a natural part of growth. Let\'s break down challenges into manageable steps and build confidence gradually.',
     suggestions: [
-      'Break down challenging tasks into smaller steps',
-      'Seek clarification on unclear expectations',
-      'Connect with a mentor or experienced colleague',
+      'Create a detailed action plan for challenging tasks',
+      'Schedule a meeting with your supervisor for clear guidance',
+      'Practice new skills in a low-pressure environment',
+      'Connect with colleagues who have overcome similar challenges',
+      'Document your progress to visualize your growth'
     ],
   },
   surprise: {
-    title: 'Adapting to Change',
-    description: 'Change can be an opportunity for growth.',
+    title: 'Embracing Change and Growth 🚀',
+    description: 'Unexpected situations can open doors to new opportunities. Let\'s channel this energy into productive adaptation.',
     suggestions: [
-      'Take a moment to process new information',
-      'List questions and seek clarification',
-      'Share your insights with the team',
+      'Document new developments and their potential impact',
+      'Identify areas where change could lead to improvement',
+      'Share your fresh perspectives with the team',
+      'Create an action plan to adapt to new circumstances',
+      'Look for learning opportunities in the unexpected'
     ],
   },
   disgust: {
-    title: 'Addressing Concerns',
-    description: 'Let\'s work on improving your work environment.',
+    title: 'Improving Your Work Environment 🌿',
+    description: 'Your high standards can drive positive change. Let\'s focus on constructive improvements while maintaining professionalism.',
     suggestions: [
-      'Identify specific issues that need attention',
-      'Discuss concerns with appropriate channels',
-      'Focus on aspects of work you find meaningful',
+      'Create a detailed list of specific issues that need addressing',
+      'Develop practical solutions to propose to management',
+      'Focus on aspects of your work that align with your values',
+      'Seek out projects that match your quality standards',
+      'Connect with colleagues who share your commitment to excellence'
     ],
   },
 };
 
 export function generateAdvice(emotions: EmotionPrediction): EmotionAdvice {
   // Find the dominant emotion
-  const dominantEmotion = Object.entries(emotions).reduce((a, b) => 
-    a[1] > b[1] ? a : b
-  )[0];
-
-  return emotionAdviceMap[dominantEmotion] || emotionAdviceMap.neutral;
+  const dominantEmotion = getDominantEmotion(emotions);
+  
+  // Get the base advice for the dominant emotion
+  const baseAdvice = emotionAdviceMap[dominantEmotion] || emotionAdviceMap.neutral;
+  
+  // Check for secondary emotions that might influence the advice
+  const sortedEmotions = Object.entries(emotions)
+    .sort(([, a], [, b]) => b - a)
+    .slice(0, 2); // Get top 2 emotions
+  
+  if (sortedEmotions.length > 1) {
+    const [primary, secondary] = sortedEmotions;
+    const [primaryEmotion, primaryValue] = primary;
+    const [secondaryEmotion, secondaryValue] = secondary;
+    
+    // If secondary emotion is significant (>30% of primary)
+    if (secondaryValue > primaryValue * 0.3) {
+      // Add a suggestion from the secondary emotion
+      const secondaryAdvice = emotionAdviceMap[secondaryEmotion];
+      if (secondaryAdvice) {
+        baseAdvice.suggestions = [
+          ...baseAdvice.suggestions.slice(0, 4),
+          secondaryAdvice.suggestions[0]
+        ];
+      }
+    }
+  }
+  
+  return baseAdvice;
 }
 
 export function getDominantEmotion(emotions: EmotionPrediction): string {

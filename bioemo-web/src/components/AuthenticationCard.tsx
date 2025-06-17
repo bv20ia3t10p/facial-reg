@@ -1,40 +1,56 @@
-import { Card, Space, Typography, Tag } from 'antd';
+import React from 'react';
+import { Card, Typography, Space, Tag } from 'antd';
 import { CheckCircleOutlined, CloseCircleOutlined } from '@ant-design/icons';
+import type { Authentication } from '../services/api';
+import { useTheme } from '../contexts/ThemeContext';
 
 const { Text } = Typography;
 
-interface Authentication {
-  id: string;
-  timestamp: string;
-  success: boolean;
-  confidence: number;
-  dominantEmotion: string;
+export interface AuthenticationCardProps {
+  authentication: Authentication;
+  style?: React.CSSProperties;
 }
 
-interface AuthenticationCardProps {
-  auth: Authentication;
-}
+export const AuthenticationCard: React.FC<AuthenticationCardProps> = ({ 
+  authentication,
+  style 
+}) => {
+  const { isDarkMode } = useTheme();
 
-export function AuthenticationCard({ auth }: AuthenticationCardProps) {
   return (
-    <Card>
-      <Space direction="vertical" style={{ width: '100%' }}>
-        <Space>
-          <Tag color={auth.success ? 'success' : 'error'}>
-            {auth.success ? (
-              <><CheckCircleOutlined /> Success</>
+    <Card
+      size="small"
+      style={{
+        borderRadius: '12px',
+        background: isDarkMode ? '#192734' : '#ffffff',
+        ...style
+      }}
+    >
+      <Space direction="vertical" size="small" style={{ width: '100%' }}>
+        <Space size="middle" style={{ width: '100%', justifyContent: 'space-between' }}>
+          <Space>
+            {authentication.success ? (
+              <CheckCircleOutlined style={{ color: '#52c41a', fontSize: '16px' }} />
             ) : (
-              <><CloseCircleOutlined /> Failed</>
+              <CloseCircleOutlined style={{ color: '#ff4d4f', fontSize: '16px' }} />
             )}
-          </Tag>
-          <Text type="secondary">{new Date(auth.timestamp).toLocaleString()}</Text>
+            <Text strong style={{ color: isDarkMode ? '#ffffff' : '#000000' }}>
+              {authentication.user?.name || 'Unknown User'}
+            </Text>
+          </Space>
+          <Text type="secondary" style={{ fontSize: '12px' }}>
+            {new Date(authentication.timestamp).toLocaleString()}
+          </Text>
         </Space>
-        <Space>
-          <Text>Confidence: {(auth.confidence * 100).toFixed(1)}%</Text>
-          <Text>•</Text>
-          <Text>Emotion: <Text strong style={{ textTransform: 'capitalize' }}>{auth.dominantEmotion}</Text></Text>
+        <Space size="small">
+          <Tag color="blue">
+            Confidence: {(authentication.confidence * 100).toFixed(1)}%
+          </Tag>
+          <Tag color="purple">
+            Emotion: {authentication.dominantEmotion}
+          </Tag>
         </Space>
       </Space>
     </Card>
   );
-} 
+}; 

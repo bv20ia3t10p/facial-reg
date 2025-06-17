@@ -1,99 +1,99 @@
-import { Typography, Row, Col, Card, Space, Spin, Statistic } from 'antd';
+import React from 'react';
+import { Card, Row, Col, Statistic } from 'antd';
 import { useQuery } from '@tanstack/react-query';
-import { 
-  CheckCircleOutlined, 
-  FieldTimeOutlined, 
-  TeamOutlined 
+import {
+  UserOutlined,
+  CheckCircleOutlined,
+  ClockCircleOutlined
 } from '@ant-design/icons';
-import { api } from '../services/api';
+import { getAnalyticsStats } from '../services/api';
 import { AuthenticationCard } from '../components/AuthenticationCard';
-
-const { Title } = Typography;
+import { useTheme } from '../contexts/ThemeContext';
 
 export function Home() {
   const { data: stats, isLoading } = useQuery({
-    queryKey: ['stats'],
-    queryFn: () => api.getStats(),
+    queryKey: ['analyticsStats'],
+    queryFn: () => getAnalyticsStats(),
   });
 
-  return (
-    <Space direction="vertical" style={{ width: '100%' }} size="large">
-      <Title level={2} style={{ margin: 0, fontWeight: 600 }}>Dashboard</Title>
+  const { isDarkMode } = useTheme();
 
-      <Row gutter={[24, 24]}>
-        <Col xs={24} md={8}>
+  return (
+    <div>
+      <Row gutter={[16, 16]}>
+        <Col xs={24} sm={24} md={8}>
           <Card 
-            bordered={false}
-            style={{ 
+            loading={isLoading}
+            className="dashboard-card"
+            style={{
+              background: isDarkMode ? '#1DA1F2' : '#1DA1F2',
               borderRadius: '16px',
-              background: 'linear-gradient(135deg, #1677ff 0%, #4096ff 100%)',
             }}
           >
-            <Statistic 
-              title={<span style={{ color: '#fff', fontSize: '16px' }}>Total Authentications</span>}
-              value={isLoading ? '-' : stats?.totalAuthentications}
-              valueStyle={{ color: '#fff', fontSize: '36px', fontWeight: 600 }}
-              prefix={<TeamOutlined style={{ fontSize: '24px' }} />}
+            <Statistic
+              title={<span style={{ color: '#ffffff' }}>Total Authentications</span>}
+              value={stats?.totalAuthentications || 0}
+              valueStyle={{ color: '#ffffff' }}
+              prefix={<UserOutlined />}
             />
           </Card>
         </Col>
-        <Col xs={24} md={8}>
+        <Col xs={24} sm={24} md={8}>
           <Card 
-            bordered={false}
-            style={{ 
+            loading={isLoading}
+            className="dashboard-card"
+            style={{
+              background: isDarkMode ? '#4CAF50' : '#4CAF50',
               borderRadius: '16px',
-              background: 'linear-gradient(135deg, #52c41a 0%, #73d13d 100%)',
             }}
           >
-            <Statistic 
-              title={<span style={{ color: '#fff', fontSize: '16px' }}>Success Rate</span>}
-              value={isLoading ? '-' : stats?.successRate}
+            <Statistic
+              title={<span style={{ color: '#ffffff' }}>Success Rate</span>}
+              value={stats?.successRate || 0}
+              precision={1}
+              valueStyle={{ color: '#ffffff' }}
+              prefix={<CheckCircleOutlined />}
               suffix="%"
-              valueStyle={{ color: '#fff', fontSize: '36px', fontWeight: 600 }}
-              prefix={<CheckCircleOutlined style={{ fontSize: '24px' }} />}
             />
           </Card>
         </Col>
-        <Col xs={24} md={8}>
+        <Col xs={24} sm={24} md={8}>
           <Card 
-            bordered={false}
-            style={{ 
+            loading={isLoading}
+            className="dashboard-card"
+            style={{
+              background: isDarkMode ? '#9C27B0' : '#9C27B0',
               borderRadius: '16px',
-              background: 'linear-gradient(135deg, #722ed1 0%, #9254de 100%)',
             }}
           >
-            <Statistic 
-              title={<span style={{ color: '#fff', fontSize: '16px' }}>Average Response Time</span>}
-              value={isLoading ? '-' : stats?.avgResponseTime}
+            <Statistic
+              title={<span style={{ color: '#ffffff' }}>Average Response Time</span>}
+              value={stats?.avgResponseTime || 0}
+              valueStyle={{ color: '#ffffff' }}
+              prefix={<ClockCircleOutlined />}
               suffix="ms"
-              valueStyle={{ color: '#fff', fontSize: '36px', fontWeight: 600 }}
-              prefix={<FieldTimeOutlined style={{ fontSize: '24px' }} />}
             />
           </Card>
         </Col>
       </Row>
 
-      <Card 
-        title={<Title level={4} style={{ margin: 0 }}>Recent Authentications</Title>}
-        bordered={false}
-        style={{ borderRadius: '16px' }}
-      >
-        <Row gutter={[16, 16]}>
-          {isLoading ? (
-            Array(4).fill(null).map((_, i) => (
-              <Col key={i} xs={24} md={12}>
-                <Card loading bordered={false} />
-              </Col>
-            ))
-          ) : (
-            stats?.recentAuthentications.map((auth) => (
-              <Col key={auth.id} xs={24} md={12}>
-                <AuthenticationCard auth={auth} />
-              </Col>
-            ))
-          )}
-        </Row>
-      </Card>
-    </Space>
+      <div style={{ marginTop: '24px' }}>
+        <Card
+          title="Recent Authentications"
+          style={{
+            borderRadius: '16px',
+            background: isDarkMode ? '#15202B' : '#ffffff',
+          }}
+        >
+          {stats?.recentAuthentications.map((auth, index) => (
+            <AuthenticationCard
+              key={auth.id || index}
+              authentication={auth}
+              style={{ marginBottom: index < stats.recentAuthentications.length - 1 ? 16 : 0 }}
+            />
+          ))}
+        </Card>
+      </div>
+    </div>
   );
 } 

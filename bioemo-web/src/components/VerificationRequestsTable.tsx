@@ -1,10 +1,11 @@
-import { Table, Button, Space, Modal, Typography, Tag, Image } from 'antd';
+import { Table, Button, Space, Modal, Typography, Tag, Image, theme } from 'antd';
 import { CheckOutlined, CloseOutlined, EyeOutlined } from '@ant-design/icons';
 import { useState } from 'react';
 import { api } from '../services/api';
 import type { VerificationRequest } from '../types';
 
 const { Text, Title } = Typography;
+const { useToken } = theme;
 
 interface RequestDetailsModalProps {
   request: VerificationRequest;
@@ -110,16 +111,17 @@ function RequestDetailsModal({ request, visible, onClose, onApprove, onReject }:
 
 export function VerificationRequestsTable({ requests, loading, onRequestProcessed }: VerificationRequestsTableProps) {
   const [selectedRequest, setSelectedRequest] = useState<VerificationRequest | null>(null);
+  const { token } = useToken();
 
   const handleApprove = async () => {
     if (!selectedRequest) return;
-    await api.approveVerificationRequest(selectedRequest.id);
+    await api.updateVerificationRequestStatus(selectedRequest.id, 'approved');
     await onRequestProcessed();
   };
 
   const handleReject = async () => {
     if (!selectedRequest) return;
-    await api.rejectVerificationRequest(selectedRequest.id);
+    await api.updateVerificationRequestStatus(selectedRequest.id, 'rejected');
     await onRequestProcessed();
   };
 
@@ -128,23 +130,27 @@ export function VerificationRequestsTable({ requests, loading, onRequestProcesse
       title: 'Employee ID',
       dataIndex: 'employeeId',
       key: 'employeeId',
+      width: 120,
     },
     {
       title: 'Reason',
       dataIndex: 'reason',
       key: 'reason',
       ellipsis: true,
+      width: '30%',
     },
     {
       title: 'Confidence',
       dataIndex: 'confidence',
       key: 'confidence',
+      width: 100,
       render: (confidence: number) => `${(confidence * 100).toFixed(1)}%`,
     },
     {
       title: 'Status',
       dataIndex: 'status',
       key: 'status',
+      width: 100,
       render: (status: string) => {
         const statusConfig = {
           pending: { color: 'gold', text: 'Pending' },
@@ -159,17 +165,21 @@ export function VerificationRequestsTable({ requests, loading, onRequestProcesse
       title: 'Submitted',
       dataIndex: 'submittedAt',
       key: 'submittedAt',
+      width: 180,
       render: (date: string) => new Date(date).toLocaleString(),
     },
     {
       title: 'Action',
       key: 'action',
+      width: 120,
+      fixed: 'right' as const,
       render: (_: any, record: VerificationRequest) => (
         <Button
+          type="link"
           icon={<EyeOutlined />}
           onClick={() => setSelectedRequest(record)}
         >
-          View Details
+          View
         </Button>
       ),
     },
@@ -182,6 +192,29 @@ export function VerificationRequestsTable({ requests, loading, onRequestProcesse
         dataSource={requests}
         loading={loading}
         rowKey="id"
+        style={{ 
+          marginTop: token.marginMD,
+          backgroundColor: token.colorBgContainer,
+          borderRadius: token.borderRadiusLG,
+          boxShadow: token.boxShadowTertiary
+        }}
+        pagination={{
+          pageSize: 10,
+          position: ['bottomCenter'],
+          showSizeChanger: true,
+          showTotal: (total: number) => `Total ${total} items`
+        }}
+        scroll={{ x: 'max-content' }}
+        onRow={(record) => ({
+          onClick: () => setSelectedRequest(record),
+          style: {
+            cursor: 'pointer',
+            transition: 'background-color 0.3s',
+            '&:hover': {
+              backgroundColor: token.colorFillAlter
+            }
+          }
+        })}
       />
 
       {selectedRequest && (

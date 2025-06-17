@@ -2,12 +2,18 @@ import React, { useEffect, useState } from 'react';
 import { Card, Row, Col, Statistic, Progress, Tabs, Timeline } from 'antd';
 import { LineChart, Line, XAxis, YAxis, CartesianGrid, Tooltip, Legend, ResponsiveContainer } from 'recharts';
 import type { HRAnalytics, DepartmentWellbeing } from '../types';
-import { api } from '../services/api';
+import { getHRAnalytics } from '../services/api';
 
 const { TabPane } = Tabs;
 
-const WellbeingCard: React.FC<{ title: string; value: number; color: string }> = ({ title, value, color }) => (
-  <Card>
+interface WellbeingCardProps {
+  title: string;
+  value: number;
+  color: string;
+}
+
+const WellbeingCard: React.FC<WellbeingCardProps> = ({ title, value, color }) => (
+  <Card variant="outlined">
     <Statistic
       title={title}
       value={value}
@@ -18,7 +24,11 @@ const WellbeingCard: React.FC<{ title: string; value: number; color: string }> =
   </Card>
 );
 
-const EmotionTrendChart: React.FC<{ data: HRAnalytics['recentEmotionalTrends'] }> = ({ data }) => (
+interface EmotionTrendChartProps {
+  data: HRAnalytics['recentEmotionalTrends'];
+}
+
+const EmotionTrendChart: React.FC<EmotionTrendChartProps> = ({ data }) => (
   <ResponsiveContainer width="100%" height={300}>
     <LineChart data={data}>
       <CartesianGrid strokeDasharray="3 3" />
@@ -47,8 +57,12 @@ const EmotionTrendChart: React.FC<{ data: HRAnalytics['recentEmotionalTrends'] }
   </ResponsiveContainer>
 );
 
-const DepartmentMetrics: React.FC<{ department: DepartmentWellbeing }> = ({ department }) => (
-  <Card title={department.department}>
+interface DepartmentMetricsProps {
+  department: DepartmentWellbeing;
+}
+
+const DepartmentMetrics: React.FC<DepartmentMetricsProps> = ({ department }) => (
+  <Card variant="outlined" title={department.department}>
     <Row gutter={[16, 16]}>
       <Col span={12}>
         <WellbeingCard
@@ -82,7 +96,11 @@ const DepartmentMetrics: React.FC<{ department: DepartmentWellbeing }> = ({ depa
   </Card>
 );
 
-const AlertsTimeline: React.FC<{ alerts: HRAnalytics['alerts'] }> = ({ alerts }) => (
+interface AlertsTimelineProps {
+  alerts: HRAnalytics['alerts'];
+}
+
+const AlertsTimeline: React.FC<AlertsTimelineProps> = ({ alerts }) => (
   <Timeline>
     {alerts.map(alert => (
       <Timeline.Item
@@ -130,7 +148,7 @@ const HRDashboard: React.FC = () => {
   useEffect(() => {
     const fetchData = async () => {
       try {
-        const data = await api.getHRAnalytics();
+        const data = await getHRAnalytics();
         setAnalytics(data);
       } catch (error) {
         console.error('Error fetching HR analytics:', error);
@@ -146,14 +164,14 @@ const HRDashboard: React.FC = () => {
   }, []);
 
   if (loading || !analytics) {
-    return <Card loading />;
+    return <Card variant="outlined" loading />;
   }
 
   return (
     <div style={{ padding: '24px' }}>
       <Row gutter={[16, 16]}>
         <Col span={24}>
-          <Card title="Overall Workplace Wellbeing">
+          <Card variant="outlined" title="Overall Workplace Wellbeing">
             <Row gutter={[16, 16]}>
               <Col span={6}>
                 <WellbeingCard
@@ -188,13 +206,13 @@ const HRDashboard: React.FC = () => {
         </Col>
 
         <Col span={16}>
-          <Card title="Emotional Trends">
+          <Card variant="outlined" title="Emotional Trends">
             <EmotionTrendChart data={analytics.recentEmotionalTrends} />
           </Card>
         </Col>
 
         <Col span={8}>
-          <Card title="Recent Alerts">
+          <Card variant="outlined" title="Recent Alerts">
             <AlertsTimeline alerts={analytics.alerts} />
           </Card>
         </Col>

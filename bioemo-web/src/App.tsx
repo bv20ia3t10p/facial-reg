@@ -1,63 +1,40 @@
-import { BrowserRouter, Routes, Route } from 'react-router-dom';
-import { QueryClient, QueryClientProvider } from '@tanstack/react-query';
-import { Toaster } from 'react-hot-toast';
-import { Layout } from './components/Layout';
-import { Home } from './pages/Home';
-import { Auth } from './pages/Auth';
-import { Analytics } from './pages/Analytics';
-import { AddUser } from './pages/AddUser';
-import HRDashboard from './pages/HRDashboard';
-import { VerificationRequests } from './pages/VerificationRequests';
+import React from 'react';
+import { BrowserRouter as Router } from 'react-router-dom';
+import { Layout } from 'antd';
+import { ThemeProvider } from './contexts/ThemeContext';
+import { Header } from './components/Header';
+import { Footer } from './components/Footer';
+import AppRoutes from './routes';
+import { useTheme } from './contexts/ThemeContext';
 
-const queryClient = new QueryClient({
-  defaultOptions: {
-    queries: {
-      refetchOnWindowFocus: false,
-      retry: 1,
-    },
-  },
-});
+const { Content } = Layout;
 
-function App() {
+const AppContent: React.FC = () => {
+  const { isDarkMode } = useTheme();
+  
   return (
-    <QueryClientProvider client={queryClient}>
-      <BrowserRouter>
-        <Layout>
-          <Routes>
-            <Route path="/" element={<Home />} />
-            <Route path="/auth" element={<Auth />} />
-            <Route path="/analytics" element={<Analytics />} />
-            <Route path="/add-user" element={<AddUser />} />
-            <Route path="/hr-dashboard" element={<HRDashboard />} />
-            <Route path="/verification-requests" element={<VerificationRequests />} />
-            {/* Settings route will be added later */}
-          </Routes>
-        </Layout>
-      </BrowserRouter>
-      <Toaster
-        position="top-right"
-        toastOptions={{
-          duration: 4000,
-          style: {
-            background: '#333',
-            color: '#fff',
-          },
-          success: {
-            iconTheme: {
-              primary: '#22c55e',
-              secondary: '#fff',
-            },
-          },
-          error: {
-            iconTheme: {
-              primary: '#ef4444',
-              secondary: '#fff',
-            },
-          },
-        }}
-      />
-    </QueryClientProvider>
+    <Layout style={{ minHeight: '100vh' }}>
+      <Header />
+      <Content style={{
+        marginTop: 64,
+        padding: '24px',
+        background: isDarkMode ? '#192734' : '#F7F9FA',
+      }}>
+        <AppRoutes />
+      </Content>
+      <Footer />
+    </Layout>
   );
-}
+};
+
+const App: React.FC = () => {
+  return (
+    <ThemeProvider>
+      <Router>
+        <AppContent />
+      </Router>
+    </ThemeProvider>
+  );
+};
 
 export default App;

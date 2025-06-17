@@ -1,0 +1,36 @@
+# Use NVIDIA CUDA base image
+FROM nvidia/cuda:11.8.0-cudnn8-runtime-ubuntu22.04
+
+# Set working directory
+WORKDIR /app
+
+# Install system dependencies
+RUN apt-get update && apt-get install -y \
+    python3.10 \
+    python3-pip \
+    libgl1-mesa-glx \
+    libglib2.0-0 \
+    && rm -rf /var/lib/apt/lists/*
+
+# Install Python dependencies
+COPY requirements.txt .
+RUN pip3 install --no-cache-dir -r requirements.txt
+
+# Copy application code
+COPY federated /app/federated
+COPY models /app/models
+COPY privacy_biometric_model.py /app/
+COPY privacy_federated_trainer.py /app/
+
+# Create necessary directories
+RUN mkdir -p /app/data /app/logs
+
+# Set environment variables
+ENV PYTHONPATH=/app
+ENV TORCH_HOME=/app/cache/torch
+ENV GLOBAL_MODEL_PATH=/app/models/global_model.pth
+ENV MAX_EPSILON=1.0
+ENV DELTA=1e-5
+
+# Run the federated coordinator
+CMD ["python", "-m", "federated.coordinator"] 

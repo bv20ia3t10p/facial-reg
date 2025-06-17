@@ -1,0 +1,21 @@
+version: '3.8'
+
+services:
+  emo-api:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    ports:
+      - "1236:8080"
+    volumes:
+      - ./model.pth:/app/model.pth
+    environment:
+      - CUDA_VISIBLE_DEVICES=0
+    deploy:
+      resources:
+        reservations:
+          devices:
+            - driver: nvidia
+              count: 1
+              capabilities: [gpu]
+    restart: unless-stopped 

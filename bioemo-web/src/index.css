@@ -7,7 +7,7 @@
   line-height: 1.5;
   font-weight: 400;
 
-  --primary-color: #1677ff;
+  --primary-color: #1DA1F2;
   --success-color: #52c41a;
   --warning-color: #faad14;
   --error-color: #f5222d;
@@ -16,12 +16,22 @@
   --text-color-secondary: #8c8c8c;
   --border-radius-base: 8px;
   --border-radius-lg: 16px;
+  --background-light: #F7F9FA;
+  --background-dark: #192734;
+  --text-primary-light: #000000;
+  --text-primary-dark: #ffffff;
+  --text-secondary-light: #536471;
+  --text-secondary-dark: #8899A6;
+  --border-light: #ebeef0;
+  --border-dark: #38444d;
+  --primary-hover: #1a91da;
 }
 
 * {
   margin: 0;
   padding: 0;
   box-sizing: border-box;
+  transition: background-color 0.3s ease, color 0.3s ease, border-color 0.3s ease;
 }
 
 body {
@@ -30,6 +40,11 @@ body {
   min-height: 100vh;
   background-color: #f5f5f5;
   color: var(--text-color);
+  font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', 'Roboto', 'Oxygen',
+    'Ubuntu', 'Cantarell', 'Fira Sans', 'Droid Sans', 'Helvetica Neue',
+    sans-serif;
+  -webkit-font-smoothing: antialiased;
+  -moz-osx-font-smoothing: grayscale;
 }
 
 h1 {
@@ -91,6 +106,8 @@ button:focus-visible {
 
 .ant-menu-item {
   border-radius: var(--border-radius-base);
+  position: relative;
+  overflow: hidden;
 }
 
 .ant-menu-item:hover {
@@ -100,6 +117,22 @@ button:focus-visible {
 
 .ant-menu-item-selected {
   background-color: #e6f4ff !important;
+}
+
+.ant-menu-item::after {
+  content: '';
+  position: absolute;
+  bottom: 0;
+  left: 50%;
+  width: 0;
+  height: 2px;
+  background: var(--primary-color);
+  transition: all 0.3s ease;
+  transform: translateX(-50%);
+}
+
+.ant-menu-item:hover::after {
+  width: 100%;
 }
 
 .ant-typography {
@@ -116,4 +149,261 @@ button:focus-visible {
 
 .ant-tag {
   font-weight: 500;
+}
+
+/* Smooth theme transition */
+* {
+  transition: background-color 0.3s ease, color 0.3s ease, border-color 0.3s ease;
+}
+
+/* Custom scrollbar */
+::-webkit-scrollbar {
+  width: 8px;
+  height: 8px;
+}
+
+::-webkit-scrollbar-track {
+  background: var(--background-light);
+}
+
+[data-theme='dark'] ::-webkit-scrollbar-track {
+  background: var(--background-dark);
+}
+
+::-webkit-scrollbar-thumb {
+  background: var(--text-secondary-light);
+  border-radius: 4px;
+}
+
+[data-theme='dark'] ::-webkit-scrollbar-thumb {
+  background: var(--text-secondary-dark);
+}
+
+::-webkit-scrollbar-thumb:hover {
+  background: var(--primary-color);
+}
+
+/* Card hover effects */
+.ant-card {
+  transition: transform 0.2s ease, box-shadow 0.2s ease;
+}
+
+.ant-card:hover {
+  transform: translateY(-2px);
+  box-shadow: 0 4px 12px rgba(0, 0, 0, 0.1);
+}
+
+[data-theme='dark'] .ant-card:hover {
+  box-shadow: 0 4px 12px rgba(0, 0, 0, 0.3);
+}
+
+/* Button hover effects */
+.ant-btn {
+  transition: all 0.2s ease;
+}
+
+.ant-btn:hover {
+  transform: translateY(-1px);
+}
+
+/* Navigation link hover effects */
+.ant-menu-item {
+  position: relative;
+  overflow: hidden;
+}
+
+.ant-menu-item::after {
+  content: '';
+  position: absolute;
+  bottom: 0;
+  left: 50%;
+  width: 0;
+  height: 2px;
+  background: var(--primary-color);
+  transition: all 0.3s ease;
+  transform: translateX(-50%);
+}
+
+.ant-menu-item:hover::after {
+  width: 100%;
+}
+
+/* Mobile responsiveness */
+@media (max-width: 768px) {
+  .desktop-menu {
+    display: none !important;
+  }
+
+  .mobile-menu-button {
+    display: block !important;
+  }
+
+  .ant-layout-content {
+    padding: 16px !important;
+    margin-top: 64px !important;
+  }
+
+  /* Adjust card layouts */
+  .ant-row > .ant-col {
+    flex: 0 0 100% !important;
+    max-width: 100% !important;
+    margin-bottom: 16px;
+  }
+
+  /* Make statistics more readable on mobile */
+  .ant-statistic {
+    text-align: center;
+  }
+
+  .ant-statistic-title {
+    font-size: 16px !important;
+  }
+
+  .ant-statistic-content {
+    font-size: 24px !important;
+  }
+
+  /* Adjust charts for mobile */
+  .recharts-wrapper {
+    width: 100% !important;
+    height: 300px !important;
+  }
+
+  /* Adjust tables for mobile */
+  .ant-table {
+    font-size: 14px;
+  }
+
+  .ant-table-cell {
+    padding: 8px !important;
+  }
+
+  /* Adjust form layouts */
+  .ant-form-item {
+    margin-bottom: 16px !important;
+  }
+
+  .ant-form-item-label {
+    padding: 0 0 4px !important;
+  }
+
+  /* Footer adjustments */
+  .ant-layout-footer {
+    padding: 16px !important;
+  }
+
+  /* Adjust spacing */
+  .ant-space {
+    gap: 8px !important;
+  }
+}
+
+/* Hide mobile menu button on desktop */
+.mobile-menu-button {
+  display: none;
+}
+
+/* Ensure proper spacing for content */
+.ant-layout-content {
+  min-height: calc(100vh - 64px - 70px) !important;
+}
+
+/* Dashboard card optimizations */
+.dashboard-card {
+  height: 100%;
+  min-height: 120px;
+  display: flex;
+  flex-direction: column;
+  justify-content: center;
+}
+
+.dashboard-card .ant-card-body {
+  padding: 16px;
+}
+
+@media (max-width: 480px) {
+  /* Extra small devices */
+  .menu-text {
+    display: none;
+  }
+
+  .ant-layout-header {
+    padding: 0 8px !important;
+  }
+
+  .dashboard-card {
+    min-height: 100px;
+  }
+
+  .ant-statistic-title {
+    font-size: 14px !important;
+  }
+
+  .ant-statistic-content {
+    font-size: 20px !important;
+  }
+}
+
+/* Hamburger menu button styles */
+.mobile-menu-button {
+  position: relative;
+  overflow: hidden;
+}
+
+.mobile-menu-button:hover {
+  background: rgba(29, 161, 242, 0.1) !important;
+}
+
+.mobile-menu-button:active {
+  background: rgba(29, 161, 242, 0.2) !important;
+}
+
+/* Add ripple effect */
+.mobile-menu-button::after {
+  content: '';
+  position: absolute;
+  width: 100%;
+  height: 100%;
+  top: 0;
+  left: 0;
+  pointer-events: none;
+  background-image: radial-gradient(circle, #1DA1F2 10%, transparent 10.01%);
+  background-repeat: no-repeat;
+  background-position: 50%;
+  transform: scale(10, 10);
+  opacity: 0;
+  transition: transform .5s, opacity 1s;
+}
+
+.mobile-menu-button:active::after {
+  transform: scale(0, 0);
+  opacity: .3;
+  transition: 0s;
+}
+
+/* Make the button more visible on mobile */
+@media (max-width: 768px) {
+  .mobile-menu-button {
+    border-radius: 50%;
+    margin-left: 8px;
+  }
+
+  /* Ensure the button is always visible */
+  .mobile-menu-button:hover,
+  .mobile-menu-button:focus {
+    background: rgba(29, 161, 242, 0.1) !important;
+  }
+
+  /* Adjust the ripple effect for dark mode */
+  [data-theme='dark'] .mobile-menu-button:hover {
+    background: rgba(255, 255, 255, 0.1) !important;
+  }
+
+  [data-theme='dark'] .mobile-menu-button:active {
+    background: rgba(255, 255, 255, 0.2) !important;
+  }
+
+  [data-theme='dark'] .mobile-menu-button::after {
+    background-image: radial-gradient(circle, #ffffff 10%, transparent 10.01%);
+  }
 }

@@ -1,6 +1,6 @@
 import { Typography, Space } from 'antd';
 import { useQuery } from '@tanstack/react-query';
-import { api } from '../services/api';
+import { getVerificationRequests } from '../services/api';
 import { VerificationRequestsTable } from '../components/VerificationRequestsTable';
 
 const { Title } = Typography;
@@ -8,7 +8,7 @@ const { Title } = Typography;
 export function VerificationRequests() {
   const { data: requests, isLoading, refetch } = useQuery({
     queryKey: ['verificationRequests'],
-    queryFn: () => api.getVerificationRequests(),
+    queryFn: () => getVerificationRequests(),
   });
 
   const pendingRequests = requests?.filter(req => req.status === 'pending') || [];

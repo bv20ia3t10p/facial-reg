@@ -1,106 +1,176 @@
-import { Card, Typography, Button, Space, Row, Col } from 'antd';
-import { useState, useCallback } from 'react';
-import { CameraOutlined } from '@ant-design/icons';
-// import { useMutation } from '@tanstack/react-query';
-import toast from 'react-hot-toast';
-import { api } from '../services/api';
-import type { EmotionPrediction, User } from '../types';
-import { AuthenticationResult } from '../components/AuthenticationResult';
-import { PasswordVerification } from '../components/PasswordVerification';
-import { UserProfile } from '../components/UserProfile';
+import React, { useState, useCallback } from 'react';
+import { useNavigate } from 'react-router-dom';
+import type { UserInfo, User, EmotionPrediction, AuthenticationResponse } from '../types';
 import { WebcamCapture } from '../components/WebcamCapture';
-import { LoginForm } from '../components/LoginForm';
+import { AuthenticationResult } from '../components/AuthenticationResult';
+import { authenticateUser, getUserInfo, predictEmotions } from '../services/api';
+import { toast } from 'react-hot-toast';
+
+// Using Ant Design components since they're already in the project
+import { Card, Typography, Space, Row, Col, Spin } from 'antd';
 
 const { Title, Text } = Typography;
 
-// const emotionColors: Record<string, string> = {
-//   happiness: '#52c41a',
-//   neutral: '#8c8c8c',
-//   surprise: '#faad14',
-//   sadness: '#1677ff',
-//   anger: '#f5222d',
-//   disgust: '#722ed1',
-//   fear: '#eb2f96',
-// };
-
-type AuthenticationResponse = Awaited<ReturnType<typeof api.authenticate>>;
-
-export function Auth() {
-  const [scanning, setScanning] = useState(false);
-  const [emotions, setEmotions] = useState<EmotionPrediction | null>(null);
-  const [showResult, setShowResult] = useState(false);
-  const [showPasswordVerification, setShowPasswordVerification] = useState(false);
-  const [isVerifying, setIsVerifying] = useState(false);
-  const [lastAuthResult, setLastAuthResult] = useState<AuthenticationResponse | null>(null);
-  const [authenticatedUser, setAuthenticatedUser] = useState<User | null>(null);
-  const [showLoginForm, setShowLoginForm] = useState(false);
+const Auth: React.FC = () => {
+  const [authResult, setAuthResult] = useState<AuthenticationResponse | null>(null);
+  const [isLoading, setIsLoading] = useState(false);
+  const [userInfo, setUserInfo] = useState<UserInfo | null>(null);
   const [capturedImage, setCapturedImage] = useState<string | null>(null);
+  const [currentEmotions, setCurrentEmotions] = useState<EmotionPrediction | null>(null);
+  const navigate = useNavigate();
 
-  const handleCapture = useCallback((imageSrc: string) => {
+  const handleCapture = useCallback(async (imageSrc: string) => {
     setCapturedImage(imageSrc);
-    handleVerify(imageSrc);
-  }, []);
-
-  const handleVerify = async (imageSrc?: string) => {
-    setScanning(true);
+    setIsLoading(true);
+    setAuthResult(null);
     try {
-      const result = await api.authenticate(imageSrc || capturedImage || '');
-      setLastAuthResult(result);
-      setShowResult(true);
-      if (result.success && result.emotions) {
-        setEmotions(result.emotions);
-        if (result.user) {
-          setAuthenticatedUser(result.user);
-        } else if (result.confidence > 0.6) {
-          setShowLoginForm(true);
+      // First authenticate the user
+      const response = await authenticateUser(imageSrc);
+      console.log('Auth response:', response);
+      
+      // Update the auth result with the captured image
+      const updatedResponse: AuthenticationResponse = {
+        ...response,
+        capturedImage: imageSrc
+      };
+      console.log('Setting auth result:', updatedResponse);
+      setAuthResult(updatedResponse);
+      
+      if (response.success) {
+        // Get emotions from the emotion API if not provided in response
+        if (!response.emotions) {
+          try {
+            const emotions = await predictEmotions(imageSrc);
+            console.log('Setting emotions:', emotions);
+            setCurrentEmotions(emotions);
+          } catch (emotionErr) {
+            console.error('Failed to get emotions:', emotionErr);
+          }
+        } else {
+          console.log('Setting emotions from response:', response.emotions);
+          setCurrentEmotions(response.emotions);
+        }
+        
+        // Fetch detailed user info
+        try {
+          const info = await getUserInfo(response.user_id);
+          console.log('Setting user info:', info);
+          setUserInfo(info);
+        } catch (infoErr) {
+          console.error('Failed to fetch user info:', infoErr);
         }
       }
-    } catch (error) {
-      toast.error('Error verifying identity');
+    } catch (err) {
+      console.error('Authentication error:', err);
+      const errorResponse: AuthenticationResponse = {
+        success: false,
+        confidence: 0,
+        message: 'Authentication failed. Please try again.',
+        error: err instanceof Error ? err.message : 'Authentication failed',
+        user_id: 'unknown',
+        authenticated_at: new Date().toISOString(),
+        capturedImage: imageSrc
+      };
+      setAuthResult(errorResponse);
+      toast.error('Authentication failed. Please try again.');
     } finally {
-      setScanning(false);
+      setIsLoading(false);
     }
-  };
+  }, []);
 
-  const handleLogin = async (values: { username: string; password: string }) => {
-    setIsVerifying(true);
-    try {
-      const result = await api.verifyCredentials(values.username, values.password);
-      if (result.success && result.user) {
-        setAuthenticatedUser(result.user);
-        setShowLoginForm(false);
-      } else {
-        toast.error('Invalid credentials');
-      }
-    } catch (error) {
-      toast.error('Error verifying credentials');
-    } finally {
-      setIsVerifying(false);
+  const handleRetry = useCallback(() => {
+    setAuthResult(null);
+    setCapturedImage(null);
+    setCurrentEmotions(null);
+    setUserInfo(null);
+  }, []);
+
+  const handlePasswordVerification = useCallback(() => {
+    if (!authResult) return;
+    
+    navigate('/password-verification', { 
+      state: { 
+        authResult,
+        capturedImage,
+        userInfo,
+        emotions: currentEmotions
+      } 
+    });
+  }, [navigate, authResult, capturedImage, userInfo, currentEmotions]);
+
+  const handleConfirm = useCallback(() => {
+    console.log('handleConfirm called with:', {
+      authResult,
+      userInfo,
+      currentEmotions,
+      capturedImage
+    });
+
+    if (!authResult) {
+      console.error('Cannot confirm: authResult is null');
+      return;
     }
-  };
 
-  const handleAdditionalVerification = async () => {
-    setShowResult(false);
-    setShowPasswordVerification(true);
-  };
-
-  const handlePasswordVerification = async (username: string, password: string) => {
-    try {
-      const result = await api.verifyCredentials(username, password);
-      if (result.success && result.user) {
-        setAuthenticatedUser(result.user);
-        setShowPasswordVerification(false);
-      } else {
-        throw new Error('Invalid credentials');
-      }
-    } catch (error) {
-      throw error;
+    if (!authResult.success) {
+      console.error('Cannot confirm: authentication was not successful');
+      return;
     }
-  };
 
-  if (authenticatedUser && emotions) {
-    return <UserProfile user={authenticatedUser} emotions={emotions} />;
-  }
+    if (!userInfo) {
+      console.error('Cannot confirm: userInfo is null');
+      return;
+    }
+
+    // Create default emotions if none exist
+    const emotions = currentEmotions || {
+      happiness: 0.0,
+      neutral: 1.0,
+      surprise: 0.0,
+      sadness: 0.0,
+      anger: 0.0,
+      disgust: 0.0,
+      fear: 0.0
+    };
+
+    // Create a user object from userInfo
+    const user: User = {
+      id: userInfo.user_id,
+      name: userInfo.name,
+      email: userInfo.email,
+      department: userInfo.department,
+      role: userInfo.role,
+      joinDate: userInfo.enrolled_at,
+      lastAuthenticated: userInfo.last_authenticated
+    };
+
+    console.log('Navigating to profile with:', {
+      user,
+      userInfo,
+      emotions
+    });
+
+    toast.success('Welcome back!');
+    
+    // Navigate to profile with all available data
+    navigate(`/profile/${authResult.user_id}`, { 
+      state: { 
+        user,
+        userInfo,
+        capturedImage,
+        emotions,
+        authResult
+      },
+      replace: true
+    });
+  }, [navigate, authResult, userInfo, currentEmotions, capturedImage]);
+
+  console.log('Current state:', {
+    authResult,
+    isLoading,
+    userInfo,
+    currentEmotions,
+    capturedImage
+  });
 
   return (
     <Row justify="center" style={{ padding: '24px' }}>
@@ -109,62 +179,40 @@ export function Auth() {
           <Card>
             <Space direction="vertical" align="center" style={{ width: '100%' }}>
               <Title level={2}>Face Recognition Authentication</Title>
-              <Text type="secondary">
-                Please position your face in front of the camera and click the button below
-              </Text>
-              
-              <WebcamCapture
-                onCapture={handleCapture}
-                isScanning={scanning}
-              />
 
-              <Button
-                type="primary"
-                size="large"
-                icon={<CameraOutlined />}
-                onClick={() => handleVerify()}
-                loading={scanning}
-                style={{
-                  height: '48px',
-                  padding: '0 32px',
-                  fontSize: '16px',
-                  borderRadius: '24px',
-                  marginTop: '24px',
-                }}
-              >
-                {scanning ? 'Verifying...' : 'Verify Identity'}
-              </Button>
+              {isLoading ? (
+                <div style={{ textAlign: 'center', padding: '40px' }}>
+                  <Spin size="large" />
+                  <Text style={{ display: 'block', marginTop: '16px' }}>
+                    Verifying your identity...
+                  </Text>
+                </div>
+              ) : (
+                <>
+                  <Text type="secondary">
+                    Please position your face in front of the camera and click the camera button to capture
+                  </Text>
+                  <WebcamCapture
+                    onCapture={handleCapture}
+                    isScanning={isLoading}
+                  />
+                </>
+              )}
             </Space>
           </Card>
-
-          {showLoginForm && (
-            <Card title="Additional Verification Required">
-              <LoginForm onSubmit={handleLogin} loading={isVerifying} />
-            </Card>
-          )}
-
-          {showResult && lastAuthResult && (
-            <AuthenticationResult
-              result={lastAuthResult}
-              onAdditionalVerification={handleAdditionalVerification}
-            />
-          )}
-
-          {showPasswordVerification && (
-            <PasswordVerification
-              visible={showPasswordVerification}
-              onClose={() => setShowPasswordVerification(false)}
-              onCancel={() => setShowPasswordVerification(false)}
-              onSuccess={(user) => {
-                setAuthenticatedUser(user);
-                setShowPasswordVerification(false);
-              }}
-              onSubmit={handlePasswordVerification}
-              loading={isVerifying}
-            />
-          )}
         </Space>
       </Col>
+
+      {authResult && (
+        <AuthenticationResult
+          result={authResult}
+          onAdditionalVerification={handlePasswordVerification}
+          onRetry={handleRetry}
+          onConfirm={handleConfirm}
+        />
+      )}
     </Row>
   );
-} 
+};
+
+export default Auth; 

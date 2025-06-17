@@ -1,6 +1,6 @@
 import { Typography, Row, Col, Card, Space, Spin } from 'antd';
 import { useQuery } from '@tanstack/react-query';
-import { api } from '../services/api';
+import { getAuthAnalytics } from '../services/api';
 import type { EmotionPrediction, Analytics as AnalyticsType } from '../types';
 
 const { Title, Text } = Typography;
@@ -19,9 +19,9 @@ function getEmotionColor(emotion: keyof EmotionPrediction): string {
 }
 
 export function Analytics() {
-  const { data: analytics, isLoading } = useQuery<AnalyticsType>({
-    queryKey: ['analytics'],
-    queryFn: () => api.getAnalytics(),
+  const { data: analytics, isLoading } = useQuery({
+    queryKey: ['authAnalytics'],
+    queryFn: () => getAuthAnalytics(),
   });
 
   return (

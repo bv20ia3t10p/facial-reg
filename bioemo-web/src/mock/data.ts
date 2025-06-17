@@ -1,46 +1,77 @@
-import type { User, DashboardStats } from '../types';
+import type { User, DashboardStats, UserInfo, EmotionPrediction } from '../types';
 
 export const mockUser: User = {
-  id: "1",
-  name: "John Doe",
-  department: "Engineering",
-  lastAuthenticated: new Date().toISOString(),
-  emotionHistory: [
-    { timestamp: new Date(Date.now() - 3600000).toISOString(), emotion: "neutral", confidence: 0.92 },
-    { timestamp: new Date(Date.now() - 7200000).toISOString(), emotion: "happy", confidence: 0.85 },
-    { timestamp: new Date(Date.now() - 10800000).toISOString(), emotion: "tired", confidence: 0.78 }
-  ]
+  id: "0000342",
+  name: "Amy Smith",
+  email: "amy.smith@company.com",
+  department: "Marketing",
+  role: "Manager",
+  joinDate: "2024-03-10T12:06:02",
+  lastAuthenticated: "2025-06-11T00:59:23"
+};
+
+export const mockUserInfo: UserInfo = {
+  user_id: mockUser.id,
+  name: mockUser.name,
+  email: mockUser.email,
+  department: mockUser.department,
+  role: mockUser.role,
+  enrolled_at: "2024-03-10T12:06:02",
+  last_login: "2025-06-11T00:59:23",
+  last_authenticated: "2025-06-11T00:59:23",
+  authentication_stats: {
+    total_attempts: 0,
+    successful_attempts: 0,
+    success_rate: 0,
+    average_confidence: 0
+  },
+  recent_attempts: [],
+  latest_auth: {
+    timestamp: null,
+    confidence: null,
+    device_info: null
+  },
+  emotional_state: {
+    happiness: 0.0,
+    neutral: 1.0,
+    surprise: 0.0,
+    sadness: 0.0,
+    anger: 0.0,
+    disgust: 0.0,
+    fear: 0.0
+  },
+  last_updated: new Date().toISOString()
 };
 
 export const mockDashboardStats: DashboardStats = {
   totalAuthentications: 157,
   averageConfidence: 0.89,
   emotionBreakdown: {
-    "neutral": 45,
-    "happy": 35,
-    "tired": 25,
-    "stressed": 15
+    [mockUser.lastAuthenticated]: {
+      happiness: 0.0,
+      neutral: 1.0,
+      surprise: 0.0,
+      sadness: 0.0,
+      anger: 0.0,
+      disgust: 0.0,
+      fear: 0.0
+    }
   },
   recentActivity: [
     {
       success: true,
       confidence: 0.95,
-      timestamp: new Date(Date.now() - 1800000).toISOString(),
-      emotion: "neutral",
+      timestamp: mockUser.lastAuthenticated,
+      emotions: {
+        happiness: 0.0,
+        neutral: 1.0,
+        surprise: 0.0,
+        sadness: 0.0,
+        anger: 0.0,
+        disgust: 0.0,
+        fear: 0.0
+      },
       message: "Successfully authenticated"
-    },
-    {
-      success: true,
-      confidence: 0.88,
-      timestamp: new Date(Date.now() - 3600000).toISOString(),
-      emotion: "happy",
-      message: "Successfully authenticated"
-    },
-    {
-      success: false,
-      confidence: 0.45,
-      timestamp: new Date(Date.now() - 5400000).toISOString(),
-      message: "Authentication failed - low confidence"
     }
   ]
 }; 

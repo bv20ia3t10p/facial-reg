@@ -92,4 +92,45 @@ export interface PasswordVerificationProps {
   visible: boolean;
   onClose: () => void;
   onSuccess: (user: User) => void;
+}
+
+export interface AuthenticationResponse {
+  success: boolean;
+  user_id: string;
+  confidence: number;
+  threshold: number;
+  authenticated_at: string;
+  emotions?: EmotionPrediction;
+}
+
+export interface UserInfo {
+  user_id: string;
+  enrolled_at: string;
+  last_login: string;
+  authentication_stats: {
+    total_attempts: number;
+    successful_attempts: number;
+    success_rate: number;
+    average_confidence: number;
+  };
+  recent_attempts: Array<{
+    timestamp: string;
+    success: boolean;
+    confidence: number;
+    device_info: string | null;
+  }>;
+  latest_auth: {
+    timestamp: string | null;
+    confidence: number | null;
+    device_info: string | null;
+  };
+  emotional_state: EmotionPrediction;
+  last_updated: string;
+}
+
+export interface UserProfileProps {
+  user: User;
+  emotions: EmotionPrediction;
+  userInfo?: UserInfo | null;
+  isLoading?: boolean;
 } 

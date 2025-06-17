@@ -1,8 +1,46 @@
-data/
+# Data and results
+/data/
 *results*
-__pycache__
+
+# Python
+__pycache__/
 *.pth
 *history.json
+
+# Logs
 *.log
-.vscode/
+logs/
 .monitoring/
+
+# VSCode and IDEs
+.vscode/
+!.vscode/extensions.json
+.idea/
+.DS_Store
+*.suo
+*.ntvs*
+*.njsproj
+*.sln
+*.sw?
+
+# Cache
+cache/
+
+# Models
+models/
+
+# Database
+/database/*.db
+
+# Frontend (bioemo-web)
+bioemo-web/node_modules/
+bioemo-web/dist/
+bioemo-web/dist-ssr/
+bioemo-web/*.local
+bioemo-web/logs
+bioemo-web/*.log
+bioemo-web/npm-debug.log*
+bioemo-web/yarn-debug.log*
+bioemo-web/yarn-error.log*
+bioemo-web/pnpm-debug.log*
+bioemo-web/lerna-debug.log*
