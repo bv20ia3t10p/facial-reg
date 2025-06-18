@@ -10,13 +10,15 @@ from fastapi.security import OAuth2PasswordBearer
 import uvicorn
 import logging
 from datetime import datetime
-#
+import os
+from pathlib import Path
+
 # Import routes
-from api.src.routes import auth, users, analytics, verification
-from api.src.utils.rate_limiter import RateLimiter
-from api.src.privacy.privacy_engine import PrivacyEngine
-from api.src.privacy.federated_manager import FederatedManager
-from api.src.db.database import init_db
+from .routes import auth, users, analytics, verification
+from .utils.rate_limiter import RateLimiter
+from .privacy.privacy_engine import PrivacyEngine
+from .privacy.federated_manager import FederatedManager
+from .db.database import init_db
 
 # Configure logging
 logging.basicConfig(
@@ -55,7 +57,13 @@ federated_manager = FederatedManager()
 async def startup():
     """Initialize components on startup"""
     logger.info("Initializing API components...")
-    await init_db()
+    
+    # Create necessary directories
+    for path in ["data", "models", "logs"]:
+        Path(path).mkdir(parents=True, exist_ok=True)
+    
+    # Initialize components
+    init_db()
     await privacy_engine.initialize()
     await federated_manager.initialize()
     logger.info("API initialization complete")
@@ -108,5 +116,21 @@ async def health_check():
         "federated_learning": await federated_manager.get_status()
     }
 
+def main():
+    """Main entry point for the application"""
+    # Get configuration from environment
+    host = os.getenv("API_HOST", "0.0.0.0")
+    port = int(os.getenv("API_PORT", "8000"))
+    reload = os.getenv("API_RELOAD", "true").lower() == "true"
+    
+    # Run the application
+    uvicorn.run(
+        "src.app:app",
+        host=host,
+        port=port,
+        reload=reload,
+        log_level="info"
+    )
+
 if __name__ == "__main__":
-    uvicorn.run("app:app", host="0.0.0.0", port=8000, reload=True) 
+    main() 

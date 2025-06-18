@@ -13,18 +13,19 @@ import jwt
 from PIL import Image
 import io
 import logging
-import aiohttp
-import asyncio
+import requests
 from urllib.parse import urljoin
 import threading
 from concurrent.futures import ThreadPoolExecutor
 import os
+import json
 
-from api.src.db.database import get_db, User, AuthenticationLog
-from api.src.privacy.privacy_engine import PrivacyEngine
-from api.src.privacy.federated_manager import FederatedManager
-from api.src.utils.face_recognition import FaceRecognizer
-from api.src.utils.security import verify_password, get_password_hash
+from ..db.database import get_db, User, AuthenticationLog, log_authentication, SessionLocal
+from ..privacy.privacy_engine import PrivacyEngine
+from ..privacy.federated_manager import FederatedManager
+from ..utils.face_recognition import FaceRecognizer
+from ..utils.security import verify_password, get_password_hash, get_current_user
+from ..services.emotion_service import EmotionAnalyzer, analyze_emotion
 
 logger = logging.getLogger(__name__)
 
@@ -63,31 +64,30 @@ def create_access_token(data: dict, expires_delta: Optional[timedelta] = None):
     encoded_jwt = jwt.encode(to_encode, SECRET_KEY, algorithm=ALGORITHM)
     return encoded_jwt
 
-async def analyze_emotion(image_data: bytes) -> Dict:
-    """Make parallel call to emotion API"""
+def analyze_emotion(image_data: bytes) -> Dict:
+    """Make call to emotion API"""
     try:
         logger.info(f"Making request to emotion API at {EMOTION_API_URL}")
-        async with aiohttp.ClientSession() as session:
-            # Create form data with the image
-            data = aiohttp.FormData()
-            data.add_field('file',
-                          image_data,
-                          filename='face.jpg',
-                          content_type='image/jpeg')
+        
+        # Create multipart form data
+        files = {
+            'file': ('face.jpg', image_data, 'image/jpeg')
+        }
+        
+        # Make request to emotion API
+        logger.info("Sending request to emotion API...")
+        response = requests.post(urljoin(EMOTION_API_URL, "/predict"), files=files)
+        
+        if response.status_code != 200:
+            logger.warning(f"Emotion API returned status {response.status_code}")
+            logger.warning(f"Response body: {response.text}")
+            return None
             
-            # Make async request to emotion API
-            logger.info("Sending request to emotion API...")
-            async with session.post(urljoin(EMOTION_API_URL, "/predict"), data=data) as response:
-                if response.status != 200:
-                    logger.warning(f"Emotion API returned status {response.status}")
-                    response_text = await response.text()
-                    logger.warning(f"Response body: {response_text}")
-                    return None
-                    
-                result = await response.json()
-                logger.info(f"Received emotion analysis result: {result}")
-                return result
-    except aiohttp.ClientError as e:
+        result = response.json()
+        logger.info(f"Received emotion analysis result: {result}")
+        return result
+        
+    except requests.RequestException as e:
         logger.error(f"Failed to connect to emotion API: {e}")
         return None
     except Exception as e:
@@ -96,18 +96,23 @@ async def analyze_emotion(image_data: bytes) -> Dict:
 
 def update_emotion_data(db: Session, log_id: str, emotion_data: Dict):
     """Update authentication log with emotion data in a separate thread"""
+    # Create a new session for this update
+    new_session = SessionLocal()
     try:
         logger.info(f"Updating emotion data for auth log {log_id}")
-        log_entry = db.query(AuthenticationLog).filter(AuthenticationLog.id == log_id).first()
+        log_entry = new_session.query(AuthenticationLog).filter(AuthenticationLog.id == log_id).first()
         if log_entry:
             log_entry.emotion_data = emotion_data
-            db.commit()
+            new_session.commit()
             logger.info(f"Successfully updated emotion data: {emotion_data}")
         else:
             logger.warning(f"Auth log {log_id} not found")
     except Exception as e:
         logger.error(f"Failed to update emotion data: {e}")
-        db.rollback()
+        if new_session.is_active:
+            new_session.rollback()
+    finally:
+        new_session.close()
 
 @router.post("/face")
 async def face_authentication(
@@ -124,8 +129,8 @@ async def face_authentication(
                 detail="Empty image file"
             )
         
-        # Start emotion analysis in parallel
-        emotion_task = asyncio.create_task(analyze_emotion(contents))
+        # Start emotion analysis in a thread
+        emotion_future = thread_pool.submit(analyze_emotion, contents)
         
         try:
             pil_image = Image.open(io.BytesIO(contents))
@@ -210,31 +215,50 @@ async def face_authentication(
             )
         
         # Authentication result
-        success = confidence >= 0.85  # Threshold
+        success = confidence >= 0.85
         
-        # Create authentication log entry first
+        # Get emotion analysis results
+        try:
+            emotion_result = await emotion_future
+            if emotion_result:
+                logger.info(f"Got emotion analysis result: {emotion_result}")
+            else:
+                logger.warning("No emotion analysis results")
+                emotion_result = {
+                    "happiness": 0.0,
+                    "neutral": 1.0,
+                    "surprise": 0.0,
+                    "sadness": 0.0,
+                    "anger": 0.0,
+                    "disgust": 0.0,
+                    "fear": 0.0
+                }
+        except Exception as e:
+            logger.error(f"Failed to get emotion analysis: {e}")
+            emotion_result = {
+                "happiness": 0.0,
+                "neutral": 1.0,
+                "surprise": 0.0,
+                "sadness": 0.0,
+                "anger": 0.0,
+                "disgust": 0.0,
+                "fear": 0.0
+            }
+        
+        # Create authentication log entry
         try:
             log_entry = AuthenticationLog(
                 user_id=matched_user.id if matched_user else None,
                 success=success,
                 confidence=float(confidence),
+                emotion_data=json.dumps(emotion_result),
                 captured_image=encrypted_features.serialize() if encrypted_features else None,
                 device_info=image.filename  # Store original filename as device info
             )
             db.add(log_entry)
             db.commit()
             db.refresh(log_entry)
-            
-            # Get emotion analysis results in background
-            emotion_result = await emotion_task
-            if emotion_result:
-                # Update emotion data in a separate thread
-                thread_pool.submit(
-                    update_emotion_data,
-                    db,
-                    log_entry.id,
-                    emotion_result
-                )
+            logger.info(f"Created authentication log entry with ID: {log_entry.id}")
             
         except Exception as e:
             logger.warning(f"Failed to log authentication: {e}")
@@ -264,12 +288,9 @@ async def face_authentication(
                         "role": matched_user.role
                     },
                     "access_token": access_token,
-                    "token_type": "bearer"
+                    "token_type": "bearer",
+                    "emotions": emotion_result
                 }
-                
-                # Add emotion analysis results if available
-                if emotion_result:
-                    response["emotions"] = emotion_result
                 
                 return response
             except Exception as e:

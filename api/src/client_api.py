@@ -13,10 +13,11 @@ import time
 import sqlite3
 from contextlib import contextmanager
 import asyncio
-import aiohttp
+import requests
 from urllib.parse import urljoin
 import json
 import uuid
+from fastapi import status
 
 import torch
 import torch.nn as nn
@@ -27,18 +28,26 @@ from PIL import Image
 import tenseal as ts
 from opacus import PrivacyEngine
 from opacus.validators import ModuleValidator
-import requests
 from sqlalchemy.orm import Session
 from sqlalchemy import text
-from api.src.db.database import get_db  # Import get_db function
+from .db.database import get_db, AuthenticationLog, User, log_authentication, init_db, json_safe_dumps
+from torchvision import transforms
+from tempfile import SpooledTemporaryFile
+
+from .utils.security import generate_uuid
+from .services.service_init import service_manager
+from .services.emotion_service import analyze_emotion
+from .models.privacy_biometric_model import PrivacyBiometricModel
+from .privacy.privacy_engine import PrivacyEngine as BiometricPrivacyEngine
+from .routes import client_users
 
 # Configure logging
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 
-def generate_uuid():
-    """Generate UUID as string"""
-    return str(uuid.uuid4())
+# Add database path configuration
+DB_PATH = os.getenv('DATABASE_URL', 'sqlite:////app/database/client1.db').replace('sqlite:///', '')
+logger.info(f"Using database at: {DB_PATH}")
 
 # Initialize FastAPI app
 app = FastAPI(title="Privacy-Preserving Biometric Client API")
@@ -52,84 +61,8 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
-# Import after FastAPI app is created to avoid circular imports
-from api.src.models.privacy_biometric_model import PrivacyBiometricModel
-from api.src.privacy.privacy_engine import PrivacyEngine as BiometricPrivacyEngine
-from api.src.routes import client_users
-from api.src.db.database import init_db
-
-# Mount user routes
-app.include_router(client_users.router, prefix="/api/users", tags=["users"])
-
 # Add emotion API URL configuration
-EMOTION_API_URL = "http://localhost:1236"  # Emotion API endpoint
-
-# Add database path configuration
-DB_PATH = os.getenv('DATABASE_URL', 'data/biometric.db').replace('sqlite:///', '')
-
-@contextmanager
-def get_db_connection():
-    """Context manager for database connections"""
-    conn = sqlite3.connect(DB_PATH)
-    conn.row_factory = sqlite3.Row  # Enable row factory for named access
-    try:
-        yield conn
-    finally:
-        conn.close()
-
-def init_db():
-    """Initialize database tables if they don't exist"""
-    with get_db_connection() as conn:
-        cursor = conn.cursor()
-        
-        # Check if tables already exist
-        cursor.execute("""
-            SELECT name FROM sqlite_master 
-            WHERE type='table' AND (name='users' OR name='authentication_logs')
-        """)
-        existing_tables = [row[0] for row in cursor.fetchall()]
-        
-        if len(existing_tables) == 2:
-            logger.info("Database tables already exist, skipping initialization")
-            return
-        
-        logger.info("Creating missing database tables...")
-        
-        # Create users table if not exists
-        if 'users' not in existing_tables:
-            cursor.execute("""
-                CREATE TABLE IF NOT EXISTS users (
-                    id TEXT PRIMARY KEY,
-                    name TEXT NOT NULL,
-                    email TEXT UNIQUE NOT NULL,
-                    department TEXT,
-                    role TEXT,
-                    password_hash TEXT NOT NULL,
-                    face_encoding BLOB,
-                    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
-                    last_authenticated TIMESTAMP
-                )
-            """)
-            logger.info("Created users table")
-        
-        # Create authentication logs table if not exists
-        if 'authentication_logs' not in existing_tables:
-            cursor.execute("""
-                CREATE TABLE IF NOT EXISTS authentication_logs (
-                    id TEXT PRIMARY KEY,
-                    user_id TEXT,
-                    success BOOLEAN,
-                    confidence REAL,
-                    emotion_data JSON,
-                    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
-                    device_info TEXT,
-                    captured_image BLOB,
-                    FOREIGN KEY (user_id) REFERENCES users(id)
-                )
-            """)
-            logger.info("Created authentication_logs table")
-        
-        conn.commit()
+EMOTION_API_URL = "http://emotion-api:8080"  # Emotion API endpoint
 
 class ClientBiometricService:
     def __init__(self, client_id: str = "client1"):
@@ -167,6 +100,49 @@ class ClientBiometricService:
         # Note: _setup_privacy is async, will be called in startup event
         self._privacy_setup_complete = False
 
+    def _load_model(self) -> nn.Module:
+        """Load the biometric model"""
+        try:
+            # In Docker, models are mounted at /app/models
+            model_path = Path(f"/app/models/best_{self.client_id}_pretrained_model.pth")
+            logger.info(f"Loading model from: {model_path}")
+            
+            if not model_path.exists():
+                logger.error(f"Model file not found at: {model_path}")
+                raise FileNotFoundError(f"Model file not found: {model_path}")
+            
+            # Create model instance
+            model = PrivacyBiometricModel(
+                num_identities=300,  # From thesis
+                privacy_enabled=True
+            ).to(self.device)
+            
+            # Load state dict
+            state_dict = torch.load(model_path, map_location=self.device)
+            
+            # Handle different state dict formats
+            if isinstance(state_dict, dict):
+                if 'model_state' in state_dict:
+                    # If state dict is wrapped in our format
+                    model.load_state_dict(state_dict['model_state'])
+                elif 'state_dict' in state_dict:
+                    # If state dict is wrapped in PyTorch format
+                    model.load_state_dict(state_dict['state_dict'])
+                else:
+                    # If it's a direct state dict
+                    model.load_state_dict(state_dict)
+            else:
+                # If it's a direct state dict
+                model.load_state_dict(state_dict)
+            
+            model.eval()
+            logger.info("Model loaded successfully")
+            return model
+            
+        except Exception as e:
+            logger.error(f"Failed to load model: {e}")
+            raise
+
     def _load_user_id_mapping(self):
         """Load mapping between model indices and actual user IDs from folder structure"""
         try:
@@ -197,31 +173,18 @@ class ClientBiometricService:
                 sample_size = min(5, len(self.user_id_mapping))
                 sample_indices = list(self.user_id_mapping.keys())[:sample_size]
                 for idx in sample_indices:
-                    logger.info(f"Model index {idx} maps to user {self.user_id_mapping[idx]}")
-                
-                # Log specific mapping for index 46 if it exists
-                if 46 in self.user_id_mapping:
-                    logger.info(f"Index 46 maps to user {self.user_id_mapping[46]}")
-                else:
-                    logger.warning(f"Index 46 not found in mapping! Max index is {max(self.user_id_mapping.keys())}")
-                    
+                    logger.info(f"Index {idx:3d} -> User {self.user_id_mapping[idx]}")
+            
         except Exception as e:
-            logger.error(f"Failed to load user ID mapping from folders: {e}")
-            # Initialize with empty mapping if folder access fails
-            self.user_id_mapping = {}
+            logger.error(f"Failed to load user ID mapping: {e}")
+            raise
 
     def get_user_id_from_index(self, index: int) -> str:
-        """Get actual user ID from model's predicted index"""
-        try:
-            if index in self.user_id_mapping:
-                return self.user_id_mapping[index]
-            else:
-                logger.warning(f"Model index {index} not found in mapping, using fallback")
-                # Fallback to timestamp-based ID if mapping fails
-                return f"user_{int(time.time())}"
-        except Exception as e:
-            logger.error(f"Error getting user ID from index: {e}")
+        """Get user ID from model index"""
+        if index not in self.user_id_mapping:
+            # Return a fallback user ID based on timestamp
             return f"user_{int(time.time())}"
+        return self.user_id_mapping[index]
 
     async def initialize(self):
         """Initialize the service including async components"""
@@ -234,57 +197,6 @@ class ClientBiometricService:
             logger.error(f"Failed to initialize client service: {e}")
             raise
 
-    def _load_model(self) -> nn.Module:
-        """Load pretrained client model with privacy modifications"""
-        try:
-            # Create model instance with ResNet18 backbone
-            model = PrivacyBiometricModel(
-                num_identities=300,  # From thesis
-                privacy_enabled=True
-            ).to(self.device)
-            
-            # Load client-specific pretrained weights
-            model_path = f"models/best_{self.client_id}_pretrained_model.pth"
-            if os.path.exists(model_path):
-                try:
-                    # Load state dict
-                    state = torch.load(model_path, map_location=self.device)
-                    
-                    # Handle different state dict formats
-                    if isinstance(state, dict):
-                        if 'model_state' in state:
-                            # If state dict is wrapped in our format
-                            model.load_state_dict(state['model_state'])
-                        elif 'state_dict' in state:
-                            # If state dict is wrapped in PyTorch format
-                            model.load_state_dict(state['state_dict'])
-                        else:
-                            # If it's a direct state dict
-                            model.load_state_dict(state)
-                    else:
-                        # If it's a direct state dict
-                        model.load_state_dict(state)
-                        
-                    logger.info(f"Successfully loaded pretrained model from {model_path}")
-                except Exception as load_error:
-                    logger.warning(f"Failed to load model state: {load_error}, using untrained model")
-            else:
-                logger.warning(f"No pretrained model found at {model_path}, using untrained model")
-            
-            # Set model to evaluation mode
-            model.eval()
-            return model
-            
-        except Exception as e:
-            logger.error(f"Failed to initialize model: {str(e)}")
-            # Return untrained model if loading fails
-            model = PrivacyBiometricModel(
-                num_identities=300,
-                privacy_enabled=True
-            ).to(self.device)
-            model.eval()
-            return model
-    
     async def _setup_privacy(self):
         """Setup privacy components (DP, HE)"""
         try:
@@ -344,7 +256,7 @@ class ClientBiometricService:
         try:
             # Preprocess image
             image_tensor = self._preprocess_image(image)
-            
+
             # Get embeddings with privacy preservation
             with torch.no_grad():
                 try:
@@ -360,7 +272,7 @@ class ClientBiometricService:
                         status_code=500,
                         detail="Failed to process biometric data"
                     )
-            
+
             # Encrypt features if privacy engine is available
             encrypted_features = None
             if self.he_context is not None:
@@ -380,7 +292,7 @@ class ClientBiometricService:
         except Exception as e:
             logger.error(f"Failed to process biometric: {str(e)}")
             raise HTTPException(status_code=500, detail=str(e))
-    
+
     def _preprocess_image(self, image: Image.Image) -> torch.Tensor:
         """Preprocess image for model input"""
         try:
@@ -412,30 +324,123 @@ class ClientBiometricService:
                 detail=f"Invalid image format: {str(e)}"
             )
 
-# Initialize service
+# Initialize client service
 client_service = ClientBiometricService()
+
+# Mount user routes
+app.include_router(client_users.router, prefix="/api/users", tags=["users"])
 
 @app.on_event("startup")
 async def startup_event():
-    """Initialize components on startup"""
-    # Initialize database
-    init_db()
-    # Initialize client service
-    await client_service.initialize()
+    """Initialize services on startup"""
+    try:
+        # Initialize database
+        init_db()
+        logger.info("Database initialized")
+        
+        # Initialize client service
+        await client_service.initialize()
+        logger.info("Client service initialized")
+        
+    except Exception as e:
+        logger.error(f"Failed to initialize services: {e}")
+        raise
+
+async def _preprocess_image(image: UploadFile) -> torch.Tensor:
+    """Preprocess image for model input"""
+    try:
+        # Read image data
+        contents = await image.read()
+        
+        # Convert to PIL Image
+        pil_image = Image.open(io.BytesIO(contents))
+        
+        # Convert to RGB if needed
+        if pil_image.mode != 'RGB':
+            pil_image = pil_image.convert('RGB')
+        
+        # Apply transformations
+        transform = transforms.Compose([
+            transforms.Resize((224, 224)),
+            transforms.ToTensor(),
+            transforms.Normalize(mean=[0.485, 0.456, 0.406],
+                              std=[0.229, 0.224, 0.225])
+        ])
+        
+        # Transform and add batch dimension
+        img_tensor = transform(pil_image).unsqueeze(0)
+        
+        # Move to device
+        return img_tensor.to(client_service.device)
+        
+    except Exception as e:
+        logger.error(f"Failed to preprocess image: {e}")
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail=f"Failed to process image: {str(e)}"
+        )
+
+async def analyze_emotion(image: UploadFile) -> Optional[Dict]:
+    """Analyze emotion in image using emotion API"""
+    try:
+        # Read image data
+        image_data = await image.read()
+        
+        # Create form data
+        files = {
+            'file': ('face.jpg', image_data, 'image/jpeg')
+        }
+        
+        # Make request to emotion API
+        logger.info(f"Making request to emotion API at {EMOTION_API_URL}")
+        response = requests.post(urljoin(EMOTION_API_URL, "/predict"), files=files)
+        
+        if response.status_code != 200:
+            logger.warning(f"Emotion API returned status {response.status_code}")
+            logger.warning(f"Response body: {response.text}")
+            return None
+            
+        result = response.json()
+        logger.info(f"Received emotion analysis result: {result}")
+        return result
+        
+    except requests.RequestException as e:
+        logger.error(f"Failed to connect to emotion API: {e}")
+        return None
+    except Exception as e:
+        logger.error(f"Emotion analysis failed: {e}")
+        return None
 
 @app.post("/authenticate")
-async def authenticate(image: UploadFile = File(...)):
-    """Authenticate a user with face recognition and emotion analysis"""
-    logger.info("Starting authentication process")
-    
-    # Start emotion analysis in background
-    emotion_task = asyncio.create_task(analyze_emotion(image))
-    
+async def authenticate(
+    image: UploadFile = File(...),
+    db: Session = Depends(get_db)
+):
     try:
-        # Process image with our model to get confidence
+        logger.info("=== Starting authentication process ===")
+        
+        # Create a copy of the image for emotion analysis
+        contents = await image.read()
+        file_copy = SpooledTemporaryFile()
+        file_copy.write(contents)
+        file_copy.seek(0)
+        
+        image_copy = UploadFile(
+            file=file_copy,
+            filename=image.filename,
+            headers={"content-type": image.content_type} if image.content_type else None
+        )
+        
+        # Start emotion analysis in background
+        emotion_task = asyncio.create_task(analyze_emotion(image_copy))
+        
+        # Reset original image file pointer
+        await image.seek(0)
+        
         try:
             # Preprocess image
-            image_tensor = client_service._preprocess_image(image)
+            image_tensor = await _preprocess_image(image)
+            logger.debug("Image preprocessed successfully")
             
             # Get model predictions
             with torch.no_grad():
@@ -449,11 +454,30 @@ async def authenticate(image: UploadFile = File(...)):
                 predicted_id = int(torch.argmax(identity_logits).item())
                 user_id = client_service.get_user_id_from_index(predicted_id)
                 
+                # Get emotion analysis results
+                try:
+                    emotion_result = await emotion_task
+                    logger.debug(f"Emotion analysis result: {json_safe_dumps(emotion_result)}")
+                except Exception as e:
+                    logger.error(f"Failed to get emotion analysis result: {e}")
+                    emotion_result = {
+                        "happiness": 0.0,
+                        "neutral": 1.0,
+                        "surprise": 0.0,
+                        "sadness": 0.0,
+                        "anger": 0.0,
+                        "disgust": 0.0,
+                        "fear": 0.0
+                    }
+                finally:
+                    # Clean up
+                    await image_copy.close()
+                    file_copy.close()
+                
                 # If user_id is fallback (timestamp-based), treat as unknown user
                 if user_id.startswith("user_") and user_id[5:].isdigit() and len(user_id) > 10:
                     logger.warning(f"Unknown user for predicted index {predicted_id}, authentication fails.")
-                    emotion_result = await emotion_task
-                    logger.info(f"Emotion analysis result for unknown user: {emotion_result}")
+                    logger.info(f"Emotion analysis result for unknown user: {json_safe_dumps(emotion_result)}")
                     return {
                         "success": False,
                         "user_id": None,
@@ -468,79 +492,113 @@ async def authenticate(image: UploadFile = File(...)):
                 
                 logger.info(f"Predicted user: {user_id} (index: {predicted_id}), confidence: {confidence:.3f}, normalized: {normalized_confidence:.3f}")
                 
+                # Log authentication attempt using SQLAlchemy
+                try:
+                    # Ensure emotion_data is properly serialized
+                    emotion_json = None
+                    if emotion_result:
+                        try:
+                            emotion_json = json.dumps(emotion_result)
+                            logger.debug(f"Successfully serialized emotion data: {emotion_json}")
+                        except Exception as e:
+                            logger.error(f"Failed to serialize emotion data: {e}")
+                            emotion_json = json.dumps({
+                                "happiness": 0.0,
+                                "neutral": 1.0,
+                                "surprise": 0.0,
+                                "sadness": 0.0,
+                                "anger": 0.0,
+                                "disgust": 0.0,
+                                "fear": 0.0
+                            })
+
+                    # Create log entry data
+                    auth_time = datetime.utcnow()
+                    log_data = {
+                        "id": generate_uuid(),
+                        "user_id": user_id,
+                        "success": normalized_confidence >= 0.7,
+                        "confidence": normalized_confidence,
+                        "emotion_data": emotion_json,
+                        "created_at": auth_time,
+                        "device_info": image.filename,
+                        "captured_image": None  # Set to None since we don't want to store the image
+                    }
+                    
+                    # Create the log entry
+                    log_entry = log_authentication(db, log_data)
+                    if not log_entry:
+                        logger.error("Failed to create authentication log entry")
+                        raise HTTPException(
+                            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+                            detail="Failed to log authentication attempt"
+                        )
+                    
+                    logger.info(f"Successfully logged authentication with ID: {log_entry.id}")
+                    
+                    # Update user's last_authenticated timestamp in folder metadata
+                    try:
+                        user_folder = Path("/app/data") / user_id
+                        if user_folder.exists() and user_folder.is_dir():
+                            # Create or update metadata file
+                            metadata_file = user_folder / "metadata.json"
+                            metadata = {
+                                "last_authenticated": auth_time.isoformat(),
+                                "last_auth_success": log_data["success"],
+                                "last_auth_confidence": log_data["confidence"]
+                            }
+                            
+                            # Update existing metadata if it exists
+                            if metadata_file.exists():
+                                try:
+                                    with open(metadata_file, 'r') as f:
+                                        existing_metadata = json.load(f)
+                                        metadata.update(existing_metadata)
+                                        metadata["last_authenticated"] = auth_time.isoformat()
+                                        metadata["last_auth_success"] = log_data["success"]
+                                        metadata["last_auth_confidence"] = log_data["confidence"]
+                                except json.JSONDecodeError:
+                                    pass  # Use default metadata if file is corrupted
+                            
+                            # Write updated metadata
+                            with open(metadata_file, 'w') as f:
+                                json.dump(metadata, f, indent=2)
+                            logger.debug(f"Updated metadata for user {user_id}")
+                        else:
+                            logger.warning(f"User folder not found: {user_folder}")
+                    except Exception as e:
+                        logger.error(f"Failed to update user metadata: {e}")
+                    
+                    # Return authentication result
+                    return {
+                        "success": log_data["success"],
+                        "user_id": user_id,
+                        "confidence": normalized_confidence,
+                        "threshold": 0.7,
+                        "authenticated_at": auth_time.isoformat(),
+                        "emotion_data": json.loads(emotion_json) if emotion_json else None
+                    }
+                    
+                except Exception as e:
+                    logger.error(f"Authentication failed with error: {str(e)}")
+                    raise HTTPException(
+                        status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+                        detail=f"Authentication failed: {str(e)}"
+                    )
+                
         except Exception as e:
-            logger.error(f"Failed to calculate confidence: {str(e)}")
-            return {
-                "success": False,
-                "user_id": None,
-                "confidence": None,
-                "threshold": 0.7,
-                "authenticated_at": datetime.utcnow().isoformat(),
-                "error": f"Authentication failed: {str(e)}"
-            }
-        
-        # Get emotion analysis results
-        try:
-            emotion_result = await emotion_task
-            logger.info(f"Emotion analysis result: {emotion_result}")
-        except Exception as e:
-            logger.error(f"Failed to get emotion analysis result: {e}")
-            emotion_result = None
-        
-        # Log authentication attempt
-        try:
-            log_id = generate_uuid()
-            with get_db_connection() as conn:
-                cursor = conn.cursor()
-                
-                # Log the query and values for debugging
-                query = """
-                    INSERT INTO authentication_logs 
-                    (id, user_id, success, confidence, emotion_data, created_at, device_info)
-                    VALUES (?, ?, ?, ?, ?, ?, ?)
-                """
-                values = (
-                    log_id,
-                    user_id,
-                    normalized_confidence >= 0.7,
-                    normalized_confidence,
-                    json.dumps(emotion_result) if emotion_result else None,
-                    datetime.utcnow().isoformat(),
-                    image.filename
-                )
-                
-                logger.info(f"Executing authentication log query: {query}")
-                logger.info(f"With values: {values}")
-                
-                cursor.execute(query, values)
-                conn.commit()
-                logger.info(f"Successfully logged authentication with ID: {log_id}")
-                
-        except Exception as e:
-            logger.error(f"Failed to log authentication: {e}")
-        
-        # Return authentication result
-        response = {
-            "success": normalized_confidence >= 0.7,
-            "user_id": user_id,
-            "confidence": normalized_confidence,
-            "threshold": 0.7,
-            "authenticated_at": datetime.utcnow().isoformat()
-        }
-        
-        # Add emotion analysis results if available
-        if emotion_result:
-            response["emotion_analysis"] = emotion_result
-            logger.info(f"Added emotion analysis to response: {emotion_result}")
-        else:
-            logger.warning("No emotion analysis results available")
-        
-        return response
-        
+            logger.error(f"Failed to process image or get predictions: {str(e)}")
+            raise HTTPException(
+                status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+                detail=f"Authentication failed: {str(e)}"
+            )
+            
+    except HTTPException:
+        raise
     except Exception as e:
-        logger.error(f"Authentication failed with error: {e}")
+        logger.error(f"Unexpected error during authentication: {str(e)}")
         raise HTTPException(
-            status_code=500,
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
             detail=f"Authentication failed: {str(e)}"
         )
 
@@ -640,41 +698,6 @@ async def get_user_info(user_id: str, db: Session = Depends(get_db)):
             status_code=500,
             detail=f"Failed to get user info: {str(e)}"
         )
-
-async def analyze_emotion(image: UploadFile) -> Optional[Dict]:
-    """Analyze emotion in image using emotion API"""
-    try:
-        # Reset file pointer to start
-        await image.seek(0)
-        
-        # Prepare the file for sending
-        form_data = aiohttp.FormData()
-        form_data.add_field('file',  # Changed from 'image' to 'file'
-                          await image.read(),
-                          filename=image.filename,
-                          content_type=image.content_type)
-        
-        # Get emotion API URL from environment with fallback
-        emotion_api_url = os.getenv("EMOTION_API_URL", "http://emotion-api:8080")
-        endpoint = urljoin(emotion_api_url, "/predict")  # Changed from /analyze to /predict
-        
-        logger.info(f"Sending emotion analysis request to: {endpoint}")
-        logger.info(f"Image filename: {image.filename}, content-type: {image.content_type}")
-        
-        async with aiohttp.ClientSession() as session:
-            async with session.post(endpoint, data=form_data) as response:
-                if response.status == 200:
-                    result = await response.json()
-                    logger.info(f"Received emotion analysis result: {result}")
-                    return result
-                else:
-                    error_text = await response.text()
-                    logger.error(f"Emotion API error ({response.status}): {error_text}")
-                    return None
-                    
-    except Exception as e:
-        logger.error(f"Failed to analyze emotion: {e}")
-        return None
 
 if __name__ == "__main__":
     import uvicorn

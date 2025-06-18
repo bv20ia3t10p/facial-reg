@@ -1,12 +1,11 @@
 # Use PyTorch CUDA base image
-ARG BASE_IMAGE=pytorch/pytorch:2.7.1-cuda11.8-cudnn9-runtime
-FROM ${BASE_IMAGE}
+FROM pytorch/pytorch:2.1.1-cuda12.1-cudnn8-runtime
 
 # Set environment variables
+ENV PYTHONPATH=/app
 ENV CUDA_VISIBLE_DEVICES=0
 ENV TORCH_USE_CUDA_DSA=1
 ENV CUDA_LAUNCH_BLOCKING=1
-ENV PYTHONPATH=/app
 ENV RELOAD=true
 
 # Install system dependencies
@@ -17,17 +16,19 @@ RUN apt-get update && apt-get install -y \
     && rm -rf /var/lib/apt/lists/*
 
 # Create necessary directories
-RUN mkdir -p /app/api /app/models /app/logs /app/data
+RUN mkdir -p /app/api /app/models /app/logs /app/data /app/cache /app/database
+
+# Set working directory
+WORKDIR /app
 
 # Copy only requirements first to leverage Docker cache
-WORKDIR /app
-COPY requirements.txt .
+COPY api/requirements.txt requirements.txt
 
 # Install Python dependencies
 RUN pip install --no-cache-dir -r requirements.txt
 
 # Copy application files (these will be overridden by volume mount in development)
-COPY . /app
+COPY api /app/api/
 
 # Set default command (can be overridden by docker-compose)
-CMD ["python", "-m", "uvicorn", "api.src.client_api:app", "--host", "0.0.0.0", "--port", "8000", "--reload", "--reload-dir", "/app/api"] 
+CMD ["uvicorn", "api.src.client_api:app", "--host", "0.0.0.0", "--port", "8000", "--reload", "--reload-dir", "/app/api"] 

@@ -1,0 +1,31 @@
+from setuptools import setup, find_packages
+
+setup(
+    name="facial-reg-api",
+    version="0.1.0",
+    packages=find_packages(),
+    install_requires=[
+        "fastapi",
+        "uvicorn",
+        "python-multipart",
+        "python-jose[cryptography]",
+        "passlib[bcrypt]",
+        "pydantic",
+        "email-validator",
+        "sqlalchemy",
+        "psycopg2-binary",
+        "alembic",
+        "torch",
+        "torchvision",
+        "numpy",
+        "pillow",
+        "tenseal",
+        "opacus",
+        "cryptography",
+        "bcrypt",
+        "python-dotenv",
+        "requests",
+        "tqdm",
+        "loguru"
+    ],
+) 

@@ -1,4 +1,4 @@
-import { Layout as AntLayout, Menu, Avatar, Typography } from 'antd';
+import { Layout as AntLayout, Menu, Avatar, Typography, Card } from 'antd';
 import { 
   HomeOutlined, 
   ScanOutlined, 
@@ -10,6 +10,7 @@ import {
   SafetyOutlined
 } from '@ant-design/icons';
 import { Link, useLocation } from 'react-router-dom';
+import React from 'react';
 
 const { Header, Sider, Content } = AntLayout;
 const { Text } = Typography;
@@ -85,4 +86,42 @@ export function Layout({ children }: LayoutProps) {
       </AntLayout>
     </AntLayout>
   );
-} 
+}
+
+export const GradientCard = ({ children, style = {}, ...props }: any) => (
+  <Card
+    style={{
+      background: 'linear-gradient(135deg, #ffffff 0%, #f0f2f5 100%)',
+      borderRadius: '16px',
+      boxShadow: '0 4px 12px rgba(0, 0, 0, 0.05)',
+      border: '1px solid rgba(0, 0, 0, 0.06)',
+      overflow: 'hidden',
+      ...style
+    }}
+    {...props}
+  >
+    {children}
+  </Card>
+);
+
+export const InfoRow = ({ label, value, icon }: { label: string; value: string | number; icon: React.ReactNode }) => (
+  <div style={{ display: 'flex', alignItems: 'center', marginBottom: '16px' }}>
+    <div style={{ 
+      width: '40px', 
+      height: '40px', 
+      borderRadius: '12px', 
+      background: 'linear-gradient(135deg, #f0f2f5 0%, #e6e9ed 100%)',
+      display: 'flex', 
+      alignItems: 'center', 
+      justifyContent: 'center',
+      marginRight: '16px',
+      boxShadow: '0 2px 6px rgba(0, 0, 0, 0.04)'
+    }}>
+      {icon}
+    </div>
+    <div>
+      <Text type="secondary" style={{ fontSize: '14px', display: 'block', marginBottom: '4px' }}>{label}</Text>
+      <Text strong style={{ fontSize: '16px', color: '#1a1a1a' }}>{value || '-'}</Text>
+    </div>
+  </div>
+); 

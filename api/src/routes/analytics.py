@@ -4,17 +4,19 @@ Analytics routes for the biometric authentication system
 
 from fastapi import APIRouter, Depends, HTTPException, status
 from sqlalchemy.orm import Session
-from typing import Dict, List
+from sqlalchemy import desc
+from typing import Dict, List, Optional
 from datetime import datetime, timedelta
 import logging
+import json
 
-from api.src.db.database import get_db, User, AuthenticationLog
-from api.src.utils.security import get_current_user
+from ..db.database import get_db, User, AuthenticationLog
+from ..utils.security import get_current_user
 
 logger = logging.getLogger(__name__)
 
 # Initialize router
-router = APIRouter()
+router = APIRouter(prefix="/analytics", tags=["analytics"])
 
 @router.get("/hr")
 async def get_hr_analytics(
@@ -184,6 +186,71 @@ async def get_analytics_stats(
         
     except Exception as e:
         logger.error(f"Failed to get analytics stats: {e}")
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail=str(e)
+        )
+
+@router.get("/auth-logs")
+async def get_auth_logs(
+    log_id: Optional[str] = None,
+    user_id: Optional[str] = None,
+    db: Session = Depends(get_db)
+):
+    """Query authentication logs by ID or user ID"""
+    try:
+        query = db.query(AuthenticationLog)
+        
+        if log_id:
+            # Query specific log by ID
+            log = query.filter(AuthenticationLog.id == log_id).first()
+            if not log:
+                raise HTTPException(
+                    status_code=status.HTTP_404_NOT_FOUND,
+                    detail=f"Authentication log {log_id} not found"
+                )
+            return {
+                "id": log.id,
+                "user_id": log.user_id,
+                "success": log.success,
+                "confidence": log.confidence,
+                "emotion_data": json.loads(log.emotion_data) if log.emotion_data else None,
+                "created_at": log.created_at.isoformat(),
+                "device_info": log.device_info
+            }
+            
+        elif user_id:
+            # Query all logs for a specific user, ordered by most recent first
+            logs = query.filter(AuthenticationLog.user_id == user_id)\
+                       .order_by(desc(AuthenticationLog.created_at))\
+                       .all()
+            return [{
+                "id": log.id,
+                "user_id": log.user_id,
+                "success": log.success,
+                "confidence": log.confidence,
+                "emotion_data": json.loads(log.emotion_data) if log.emotion_data else None,
+                "created_at": log.created_at.isoformat(),
+                "device_info": log.device_info
+            } for log in logs]
+        
+        else:
+            # If no specific filters, return last 24 hours of logs
+            yesterday = datetime.utcnow() - timedelta(days=1)
+            logs = query.filter(AuthenticationLog.created_at >= yesterday)\
+                       .order_by(desc(AuthenticationLog.created_at))\
+                       .all()
+            return [{
+                "id": log.id,
+                "user_id": log.user_id,
+                "success": log.success,
+                "confidence": log.confidence,
+                "emotion_data": json.loads(log.emotion_data) if log.emotion_data else None,
+                "created_at": log.created_at.isoformat(),
+                "device_info": log.device_info
+            } for log in logs]
+            
+    except Exception as e:
         raise HTTPException(
             status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
             detail=str(e)

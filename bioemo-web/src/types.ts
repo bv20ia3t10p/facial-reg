@@ -101,31 +101,41 @@ export interface AuthenticationResponse {
   threshold: number;
   authenticated_at: string;
   emotions?: EmotionPrediction;
+  message?: string;
+  error?: string;
+  capturedImage?: string;
+}
+
+export interface AuthenticationAttempt {
+  timestamp: string;
+  success: boolean;
+  confidence: number;
+  emotion_data: EmotionPrediction;
+}
+
+export interface AuthenticationStats {
+  total_attempts: number;
+  successful_attempts: number;
+  success_rate: number;
+  average_confidence: number;
 }
 
 export interface UserInfo {
   user_id: string;
+  name: string;
+  email: string;
+  department: string;
+  role: string;
   enrolled_at: string;
-  last_login: string;
-  authentication_stats: {
-    total_attempts: number;
-    successful_attempts: number;
-    success_rate: number;
-    average_confidence: number;
-  };
-  recent_attempts: Array<{
-    timestamp: string;
-    success: boolean;
-    confidence: number;
-    device_info: string | null;
-  }>;
-  latest_auth: {
-    timestamp: string | null;
-    confidence: number | null;
-    device_info: string | null;
-  };
+  last_authenticated: string;
+  authentication_stats: AuthenticationStats;
+  recent_attempts: AuthenticationAttempt[];
+  latest_auth: AuthenticationAttempt;
   emotional_state: EmotionPrediction;
-  last_updated: string;
+  emotion_trends?: {
+    average: EmotionPrediction;
+    dominant: string;
+  };
 }
 
 export interface UserProfileProps {

@@ -24,7 +24,7 @@ import sqlite3
 import psutil
 
 # Import federated integration
-from .federated_integration import get_federated_integration, initialize_federated_integration
+from federated_integration import get_federated_integration, initialize_federated_integration
 
 # Configure logging
 logging.basicConfig(

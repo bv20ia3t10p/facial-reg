@@ -8,47 +8,86 @@ from typing import List, Optional, Dict
 from datetime import datetime, timedelta
 import logging
 from collections import defaultdict
+import json
 
-from api.src.db.database import get_db, User, AuthenticationLog
-from api.src.utils.security import get_current_user, get_password_hash, verify_password
+from ..db.database import get_db, User, AuthenticationLog
+from ..utils.security import get_current_user, get_password_hash, verify_password
 
 logger = logging.getLogger(__name__)
 
 # Initialize router
 router = APIRouter()
 
-def calculate_emotion_trends(auth_history: List[AuthenticationLog]) -> Dict:
-    """Calculate emotion trends from authentication history"""
-    if not auth_history:
-        return {}
+def parse_emotion_data(emotion_data: Optional[Dict[str, float]]) -> Dict[str, float]:
+    """Parse and normalize emotion data"""
+    default_emotions = {
+        "happiness": 0.0,
+        "neutral": 1.0,
+        "surprise": 0.0,
+        "sadness": 0.0,
+        "anger": 0.0,
+        "disgust": 0.0,
+        "fear": 0.0
+    }
     
-    # Initialize counters
-    emotion_counts = defaultdict(int)
-    emotion_confidences = defaultdict(list)
-    
-    # Process each authentication log
-    for auth in auth_history:
-        if auth.emotion_data and isinstance(auth.emotion_data, dict):
-            # Get the primary emotion and its confidence
-            emotion = auth.emotion_data.get('emotion')
-            if emotion:
-                emotion_counts[emotion] += 1
-                if 'confidence' in auth.emotion_data:
-                    emotion_confidences[emotion].append(auth.emotion_data['confidence'])
-    
-    # Calculate percentages and average confidences
-    total_emotions = sum(emotion_counts.values())
-    emotion_trends = {}
-    
-    if total_emotions > 0:
-        for emotion, count in emotion_counts.items():
-            emotion_trends[emotion] = {
-                'percentage': (count / total_emotions) * 100,
-                'average_confidence': sum(emotion_confidences[emotion]) / len(emotion_confidences[emotion])
-                if emotion_confidences[emotion] else 0
+    if not emotion_data:
+        return default_emotions
+        
+    try:
+        if isinstance(emotion_data, str):
+            emotion_data = json.loads(emotion_data)
+            
+        # If the data has probabilities field, use that
+        if isinstance(emotion_data, dict) and 'probabilities' in emotion_data:
+            probabilities = emotion_data['probabilities']
+            
+            # Map the emotion names
+            emotion_map = {
+                'happy': 'happiness',
+                'surprised': 'surprise',
+                'sad': 'sadness',
+                'angry': 'anger',
+                'disgusted': 'disgust',
+                'fearful': 'fear',
+                'neutral': 'neutral'
             }
-    
-    return emotion_trends
+            
+            normalized = {}
+            for emotion, value in probabilities.items():
+                emotion_key = emotion_map.get(emotion.lower(), emotion.lower())
+                if emotion_key in default_emotions:
+                    # Ensure the value is between 0 and 1
+                    try:
+                        value = float(value)
+                        normalized[emotion_key] = max(0.0, min(1.0, value))
+                    except (ValueError, TypeError):
+                        normalized[emotion_key] = default_emotions[emotion_key]
+            
+            # Fill in missing emotions with defaults
+            for emotion in default_emotions:
+                if emotion not in normalized:
+                    normalized[emotion] = default_emotions[emotion]
+                    
+            return normalized
+            
+        # If it's already in the right format, just normalize the values
+        normalized = {}
+        for emotion, value in emotion_data.items():
+            if emotion in default_emotions:
+                try:
+                    value = float(value)
+                    normalized[emotion] = max(0.0, min(1.0, value))
+                except (ValueError, TypeError):
+                    normalized[emotion] = default_emotions[emotion]
+                    
+        # Fill in missing emotions with defaults
+        for emotion in default_emotions:
+            if emotion not in normalized:
+                normalized[emotion] = default_emotions[emotion]
+                
+        return normalized
+    except (json.JSONDecodeError, AttributeError, ValueError):
+        return default_emotions
 
 @router.get("/{user_id}")
 async def get_user_info(
@@ -59,25 +98,10 @@ async def get_user_info(
     try:
         logger.info(f"Looking up user with ID: {user_id}")
         
-        # Log database state
-        total_users = db.query(User).count()
-        logger.info(f"Total users in database: {total_users}")
-        
-        # Log the exact SQL query being executed
-        query = db.query(User).filter(User.id == user_id)
-        logger.info(f"Executing SQL query: {query.statement.compile(compile_kwargs={'literal_binds': True})}")
-        
         # Get user with detailed logging
-        user = query.first()
+        user = db.query(User).filter(User.id == user_id).first()
         if not user:
             logger.warning(f"User not found: {user_id}")
-            # Log all user IDs for debugging
-            all_users = db.query(User.id).all()
-            user_ids = [u[0] for u in all_users]
-            logger.info(f"Available user IDs: {user_ids}")
-            # Log the exact format of the requested ID vs available IDs
-            logger.info(f"Requested ID type: {type(user_id)}, value: '{user_id}'")
-            logger.info(f"Available ID types: {[type(uid) for uid in user_ids]}")
             raise HTTPException(
                 status_code=status.HTTP_404_NOT_FOUND,
                 detail=f"User not found: {user_id}"
@@ -92,37 +116,51 @@ async def get_user_info(
         
         logger.info(f"Found {len(auth_history)} authentication records for user {user_id}")
         
-        # Calculate stats
+        # Calculate authentication stats
         total_attempts = len(auth_history)
         successful_attempts = sum(1 for auth in auth_history if auth.success)
         success_rate = (successful_attempts / total_attempts * 100) if total_attempts > 0 else 0
         avg_confidence = sum(auth.confidence for auth in auth_history) / total_attempts if total_attempts > 0 else 0
         
-        logger.info(f"User {user_id} stats - Total attempts: {total_attempts}, "
-                   f"Success rate: {success_rate:.1f}%, Avg confidence: {avg_confidence:.3f}")
-        
-        # Get latest authentication
+        # Get latest authentication and emotion data
         latest_auth = auth_history[0] if auth_history else None
+        latest_emotion_data = None
+        if latest_auth and latest_auth.emotion_data:
+            latest_emotion_data = parse_emotion_data(latest_auth.emotion_data)
         
         # Calculate emotion trends
-        emotion_trends = calculate_emotion_trends(auth_history)
+        emotion_sums = defaultdict(float)
+        emotion_counts = defaultdict(int)
         
-        # Get recent emotion data (last 24 hours)
-        recent_cutoff = datetime.utcnow() - timedelta(hours=24)
-        recent_emotions = [
-            auth.emotion_data for auth in auth_history 
-            if auth.created_at >= recent_cutoff and auth.emotion_data
-        ]
+        for auth in auth_history:
+            if auth.emotion_data:
+                emotion_data = parse_emotion_data(auth.emotion_data)
+                for emotion, value in emotion_data.items():
+                    emotion_sums[emotion] += float(value)
+                    emotion_counts[emotion] += 1
+        
+        # Calculate averages
+        avg_emotions = {}
+        for emotion in emotion_sums:
+            if emotion_counts[emotion] > 0:
+                avg_emotions[emotion] = round(emotion_sums[emotion] / emotion_counts[emotion], 16)
+            else:
+                avg_emotions[emotion] = 0.0
+        
+        # Find dominant emotion
+        dominant_emotion = "neutral"
+        if avg_emotions:
+            dominant_emotion = max(avg_emotions.items(), key=lambda x: x[1])[0]
         
         # Prepare response
         response = {
             "user_id": str(user.id),
             "name": user.name,
             "email": user.email,
-            "department": user.department,
-            "role": user.role,
+            "department": user.department or "Unknown",
+            "role": user.role or "User",
             "enrolled_at": user.created_at.isoformat(),
-            "last_authenticated": user.last_authenticated.isoformat() if user.last_authenticated else None,
+            "last_authenticated": latest_auth.created_at.isoformat() if latest_auth else None,
             "authentication_stats": {
                 "total_attempts": total_attempts,
                 "successful_attempts": successful_attempts,
@@ -132,27 +170,22 @@ async def get_user_info(
             "recent_attempts": [
                 {
                     "timestamp": auth.created_at.isoformat(),
-                    "success": auth.success,
-                    "confidence": auth.confidence,
-                    "emotion_data": auth.emotion_data
+                    "success": bool(auth.success),
+                    "confidence": float(auth.confidence),
+                    "emotion_data": parse_emotion_data(auth.emotion_data)
                 }
                 for auth in auth_history[:5]  # Last 5 attempts
             ],
             "latest_auth": {
                 "timestamp": latest_auth.created_at.isoformat() if latest_auth else None,
-                "confidence": latest_auth.confidence if latest_auth else None,
-                "emotion_data": latest_auth.emotion_data if latest_auth else None
+                "confidence": float(latest_auth.confidence) if latest_auth else None,
+                "emotion_data": latest_emotion_data or parse_emotion_data(None)
             },
-            "emotion_analysis": {
-                "trends": emotion_trends,
-                "recent_emotions": recent_emotions[:10],  # Last 10 emotion readings
-                "last_24h_summary": {
-                    "total_readings": len(recent_emotions),
-                    "dominant_emotion": max(emotion_trends.items(), key=lambda x: x[1]['percentage'])[0]
-                    if emotion_trends else None
-                }
-            },
-            "last_updated": datetime.utcnow().isoformat()
+            "emotional_state": latest_emotion_data or parse_emotion_data(None),
+            "emotion_trends": {
+                "average": avg_emotions,
+                "dominant": dominant_emotion
+            }
         }
         
         logger.info(f"Successfully retrieved user info for {user_id}")
@@ -166,8 +199,6 @@ async def get_user_info(
             status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
             detail=str(e)
         )
-    finally:
-        db.close()  # Close the session after we're done with it
 
 @router.get("/me")
 async def get_current_user_info(

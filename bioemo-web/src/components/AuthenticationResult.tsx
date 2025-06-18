@@ -1,8 +1,9 @@
 import { Modal, Typography, Progress, Button, Space, Alert, Steps, Divider } from 'antd';
 import { CheckCircleOutlined, WarningOutlined, CloseCircleOutlined, CameraOutlined, UserOutlined, LockOutlined } from '@ant-design/icons';
-import type { AuthenticationResponse } from '../services/api';
+import type { AuthenticationResponse } from '../types';
 import { useState } from 'react';
 import { ManualVerificationForm } from './ManualVerificationForm';
+import { EmotionDisplay } from './EmotionDisplay';
 
 const { Text, Title, Paragraph } = Typography;
 const { Step } = Steps;
@@ -15,7 +16,7 @@ export interface AuthenticationResultProps {
 }
 
 export function AuthenticationResult({ result, onAdditionalVerification, onRetry, onConfirm }: AuthenticationResultProps) {
-  const { success, confidence, message, error, threshold = 0.7 } = result;
+  const { success, confidence, message, error, threshold = 0.7, emotions } = result;
   const [showManualForm, setShowManualForm] = useState(false);
 
   const getStatusIcon = () => {
@@ -122,6 +123,13 @@ export function AuthenticationResult({ result, onAdditionalVerification, onRetry
               strokeWidth={12}
             />
           </div>
+
+          {emotions && (
+            <>
+              <Divider>Emotional State</Divider>
+              <EmotionDisplay emotions={emotions} />
+            </>
+          )}
 
           {!success && (
             <>

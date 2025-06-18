@@ -4,12 +4,12 @@ Verification request routes for the biometric authentication system
 
 from fastapi import APIRouter, Depends, HTTPException, status, File, UploadFile, Form
 from sqlalchemy.orm import Session
-from typing import List
+from typing import List, Optional
 from datetime import datetime
 import logging
 
-from api.src.db.database import get_db, User, VerificationRequest
-from api.src.utils.security import get_current_user
+from ..db.database import get_db, User, VerificationRequest
+from ..utils.security import get_current_user
 
 logger = logging.getLogger(__name__)
 

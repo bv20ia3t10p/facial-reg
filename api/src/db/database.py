@@ -5,37 +5,109 @@ Database initialization and models for the biometric authentication system
 from sqlalchemy import create_engine, Column, String, Float, DateTime, Boolean, ForeignKey, JSON, LargeBinary
 from sqlalchemy.orm import foreign
 from sqlalchemy.ext.declarative import declarative_base
-from sqlalchemy.orm import sessionmaker, relationship
+from sqlalchemy.orm import sessionmaker, relationship, Session
 from sqlalchemy import text
 import uuid
 from datetime import datetime
 import logging
-from typing import Optional
+from typing import Optional, Any, Dict
 import os
 from fastapi import HTTPException, status, Depends
-from sqlalchemy.orm import Session
 from pathlib import Path
+import json
+
+from ..utils.security import generate_uuid
 
 logger = logging.getLogger(__name__)
 
-# Initialize SQLAlchemy
-Base = declarative_base()
+def json_safe_dumps(obj: Any) -> str:
+    """Convert object to JSON string, handling datetime objects"""
+    def datetime_handler(obj):
+        if isinstance(obj, datetime):
+            return obj.isoformat()
+        raise TypeError(f"Object of type {type(obj)} is not JSON serializable")
+    
+    return json.dumps(obj, default=datetime_handler, indent=2)
 
-# Use SQLite for development, PostgreSQL for production
-DATABASE_URL = os.getenv("DATABASE_URL", "sqlite:///data/biometric.db")  # Updated to match docker-compose
+def sanitize_log_data(data: Dict[str, Any]) -> Dict[str, Any]:
+    """Sanitize data for logging by removing sensitive fields and converting datetime objects"""
+    if not isinstance(data, dict):
+        return data
+        
+    sanitized = {}
+    sensitive_fields = {'password_hash', 'captured_image', 'face_encoding'}
+    
+    for k, v in data.items():
+        if k in sensitive_fields:
+            continue
+        if isinstance(v, datetime):
+            sanitized[k] = v.isoformat()
+        elif isinstance(v, dict):
+            sanitized[k] = sanitize_log_data(v)
+        else:
+            sanitized[k] = v
+    
+    return sanitized
 
+DATABASE_URL = os.getenv("DATABASE_URL", "sqlite:////app/database/client1.db")
 logger.info(f"Using database at: {DATABASE_URL}")
 
+# Configure SQLite database
+if DATABASE_URL.startswith("sqlite"):
+    db_path = DATABASE_URL.replace('sqlite:///', '')
+    db_dir = os.path.dirname(db_path)
+    if not os.path.exists(db_dir):
+        os.makedirs(db_dir, exist_ok=True)
+
+    # Create a temporary engine to set up PRAGMA statements
+    temp_engine = create_engine(
+        DATABASE_URL,
+        connect_args={"check_same_thread": False}
+    )
+    
+    with temp_engine.connect() as conn:
+        # Set SQLite PRAGMA statements
+        pragmas = [
+            "PRAGMA journal_mode = WAL",
+            "PRAGMA synchronous = NORMAL",
+            "PRAGMA cache_size = -2000",
+            "PRAGMA busy_timeout = 30000",
+            "PRAGMA temp_store = MEMORY",
+            "PRAGMA page_size = 4096",
+            "PRAGMA mmap_size = 268435456",
+            "PRAGMA locking_mode = EXCLUSIVE",
+            "PRAGMA cache_spill = FALSE"
+        ]
+        for pragma in pragmas:
+            conn.execute(text(pragma))
+            
+    temp_engine.dispose()
+
+# Create the main engine
 engine = create_engine(
     DATABASE_URL,
-    connect_args={"check_same_thread": False} if DATABASE_URL.startswith("sqlite") else {},
-    echo=True  # Enable SQL query logging
+    connect_args={
+        "check_same_thread": False,
+        "timeout": 30,
+        "uri": True
+    } if DATABASE_URL.startswith("sqlite") else {},
+    echo=True,
+    pool_pre_ping=True,
+    pool_recycle=3600,
+    pool_size=20,
+    max_overflow=10
 )
-SessionLocal = sessionmaker(autocommit=False, autoflush=False, bind=engine)
 
-def generate_uuid():
-    """Generate UUID as string"""
-    return str(uuid.uuid4())
+# Create session factory
+SessionLocal = sessionmaker(
+    bind=engine,
+    class_=Session,  # Use synchronous Session
+    autocommit=False,
+    autoflush=False,
+    expire_on_commit=False
+)
+
+Base = declarative_base()
 
 class User(Base):
     """User model for storing biometric authentication data"""
@@ -70,7 +142,7 @@ class AuthenticationLog(Base):
     confidence = Column(Float, nullable=False)
     emotion_data = Column(JSON)  # Store full emotion analysis results
     created_at = Column(DateTime, default=datetime.utcnow)
-    device_info = Column(String)  # Store device information
+    device_info = Column(String)  # Store device info
     captured_image = Column(LargeBinary, nullable=True)  # Optional captured image storage
 
 class VerificationRequest(Base):
@@ -103,95 +175,106 @@ class Client(Base):
     privacy_budget = Column(Float, default=1.0)
     metrics = Column(JSON)  # Stores training metrics
 
-def test_db_connection():
-    """Test database connection and log results"""
+def get_db():
+    """Get database session with connection testing and proper cleanup"""
+    session_id = str(uuid.uuid4())[:8]  # Generate short session ID for logging
+    db = None
     try:
-        with engine.connect() as conn:
-            # Test basic connection
-            result = conn.execute(text("SELECT 1"))
-            logger.info("Database connection test successful")
-            
-            # Check if authentication_logs table exists
-            result = conn.execute(text("SELECT name FROM sqlite_master WHERE type='table' AND name='authentication_logs'"))
-            tables = result.fetchall()
-            if not tables:
-                logger.error("Authentication logs table not found in database!")
-            else:
-                logger.info("Authentication logs table exists")
-                
-                # Count logs
-                result = conn.execute(text("SELECT COUNT(*) FROM authentication_logs"))
-                count = result.fetchone()[0]
-                logger.info(f"Found {count} authentication logs in database")
-                
-            return True
+        logger.info(f"=== Creating new database session {session_id} ===")
+        db = SessionLocal()
+        
+        # Test connection with a simple query
+        logger.debug(f"[Session {session_id}] Testing database connection")
+        result = db.execute(text("SELECT 1"))
+        if not result.fetchone():
+            logger.error(f"[Session {session_id}] Database connection test failed")
+            raise Exception("Database connection test failed")
+        
+        logger.info(f"[Session {session_id}] Database connection test successful")
+        yield db
+        
     except Exception as e:
-        logger.error(f"Database connection test failed: {str(e)}")
-        return False
+        logger.error(f"[Session {session_id}] Failed to create database session: {e}")
+        if db:
+            try:
+                logger.debug(f"[Session {session_id}] Rolling back failed session")
+                db.rollback()
+            except Exception as close_error:
+                logger.error(f"[Session {session_id}] Error rolling back failed session: {close_error}")
+        raise
+        
+    finally:
+        if db:
+            try:
+                logger.debug(f"[Session {session_id}] Closing database session")
+                db.close()
+                logger.info(f"=== Closed database session {session_id} ===")
+            except Exception as e:
+                logger.error(f"[Session {session_id}] Error closing database session: {e}")
 
-async def init_db():
-    """Initialize database and create tables"""
+def init_db():
+    """Initialize database tables if they don't exist"""
     try:
-        logger.info("Initializing database...")
-        
-        # Test connection first
-        if not test_db_connection():
-            logger.error("Database connection test failed during initialization")
-            return
-        
+        logger.info("=== Initializing database ===")
         # Create tables
         Base.metadata.create_all(bind=engine)
-        logger.info("✓ Database tables created")
+        logger.info("Database tables created successfully")
         
-        # Run migrations
-        from api.src.db.migrate_db import migrate_database
-        if migrate_database():
-            logger.info("✓ Database migrations completed")
-        else:
-            logger.error("Database migrations failed")
-            
     except Exception as e:
-        logger.error(f"Database initialization failed: {e}")
+        logger.error(f"Failed to initialize database: {e}")
         raise
 
-def get_db():
-    """Get database session with connection testing"""
-    db = SessionLocal()
-    try:
-        # Test connection with a simple query
-        db.execute(text("SELECT 1"))
-        logger.debug("Database session created successfully")
-        return db
-    except Exception as e:
-        logger.error(f"Failed to create database session: {e}")
-        db.close()
-        raise
-
-# Create database functions
 def create_user(db, user_data: dict) -> Optional[User]:
     """Create a new user"""
     try:
+        sanitized_data = sanitize_log_data(user_data)
+        logger.info(f"Creating new user with data: {json_safe_dumps(sanitized_data)}")
         user = User(**user_data)
         db.add(user)
         db.commit()
         db.refresh(user)
+        logger.info(f"Successfully created user: {user.id}")
         return user
     except Exception as e:
-        db.rollback()
         logger.error(f"Failed to create user: {e}")
+        db.rollback()
         return None
 
 def log_authentication(db, log_data: dict) -> Optional[AuthenticationLog]:
     """Log an authentication attempt"""
     try:
-        log = AuthenticationLog(**log_data)
-        db.add(log)
+        # Validate required fields
+        required_fields = ['id', 'user_id', 'success', 'confidence', 'created_at']
+        missing_fields = [field for field in required_fields if field not in log_data]
+        if missing_fields:
+            logger.error(f"Missing required fields for authentication log: {missing_fields}")
+            return None
+
+        # Ensure created_at is a datetime object
+        if isinstance(log_data['created_at'], str):
+            try:
+                log_data['created_at'] = datetime.fromisoformat(log_data['created_at'].replace('Z', '+00:00'))
+            except ValueError as e:
+                logger.error(f"Invalid datetime format in created_at: {e}")
+                return None
+
+        # Log sanitized data
+        sanitized_data = sanitize_log_data(log_data)
+        logger.info(f"Creating authentication log for user {log_data['user_id']}")
+        logger.debug(f"Authentication log data: {json_safe_dumps(sanitized_data)}")
+
+        # Create log entry using SQLAlchemy ORM
+        log_entry = AuthenticationLog(**log_data)
+        db.add(log_entry)
         db.commit()
-        db.refresh(log)
-        return log
+        db.refresh(log_entry)
+        
+        logger.info(f"Successfully created authentication log with ID: {log_entry.id}")
+        return log_entry
+        
     except Exception as e:
+        logger.error(f"Failed to create authentication log: {e}")
         db.rollback()
-        logger.error(f"Failed to log authentication: {e}")
         return None
 
 def create_verification_request(db, request_data: dict) -> Optional[VerificationRequest]:

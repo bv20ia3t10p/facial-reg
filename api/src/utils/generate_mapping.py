@@ -8,7 +8,7 @@ from pathlib import Path
 import logging
 from sqlalchemy import create_engine
 from sqlalchemy.orm import sessionmaker
-from api.src.db.database import User
+from ..db.database import User
 
 # Configure logging
 logging.basicConfig(level=logging.INFO)

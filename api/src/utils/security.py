@@ -12,6 +12,7 @@ from fastapi.security import OAuth2PasswordBearer
 from jose import JWTError, jwt
 from datetime import datetime, timedelta
 from pydantic import BaseModel
+import uuid
 
 logger = logging.getLogger(__name__)
 
@@ -188,4 +189,8 @@ def verify_api_key(api_key: str, hashed_key: str) -> bool:
         return pwd_context.verify(api_key, hashed_key)
     except Exception as e:
         logger.error(f"API key verification failed: {e}")
-        return False 
+        return False
+
+def generate_uuid() -> str:
+    """Generate a unique identifier"""
+    return str(uuid.uuid4()) 

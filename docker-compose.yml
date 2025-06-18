@@ -7,26 +7,24 @@ services:
     build:
       context: .
       dockerfile: Dockerfile.client
-      args:
-        BASE_IMAGE: pytorch/pytorch:2.7.1-cuda11.8-cudnn9-runtime
     container_name: client1-biometric-api
     ports:
       - "8000:8000"
     volumes:
+      - ./api:/app/api
       - ./data/partitioned/client1:/app/data
       - ./models:/app/models
       - ./cache:/app/cache
       - ./logs:/app/logs
-      - ./database/client1.db:/app/data/biometric.db
+      - ./database/client1.db:/app/database/client1.db
       - pip-cache:/root/.cache/pip
-      - ./api:/app/api
     environment:
       - PYTHONPATH=/app
       - TORCH_HOME=/app/cache/torch
       - NVIDIA_VISIBLE_DEVICES=all
       - MODEL_PATH=/app/models/best_client1_pretrained_model.pth
       - CLIENT_ID=client1
-      - DATABASE_URL=sqlite:///data/biometric.db
+      - DATABASE_URL=sqlite:////app/database/client1.db
       - JWT_SECRET=your-secret-key-client1
       - RATE_LIMIT_AUTH=5
       - RATE_LIMIT_DEFAULT=10
@@ -53,12 +51,6 @@ services:
     restart: unless-stopped
     networks:
       - biometric-net
-    command: >
-      bash -c "
-        mkdir -p /app/data &&
-        chmod 777 /app/data &&
-        python -m uvicorn api.src.client_api:app --host 0.0.0.0 --port 8000 --reload --reload-dir /app/api
-      "
 
   # Emotion Analysis API Service
   emotion-api:
