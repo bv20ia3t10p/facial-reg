@@ -2,6 +2,7 @@ import React from 'react';
 import { BrowserRouter as Router } from 'react-router-dom';
 import { Layout } from 'antd';
 import { ThemeProvider } from './contexts/ThemeContext';
+import { UserProvider } from './contexts/UserContext';
 import { Header } from './components/Header';
 import { Footer } from './components/Footer';
 import AppRoutes from './routes';
@@ -30,9 +31,11 @@ const AppContent: React.FC = () => {
 const App: React.FC = () => {
   return (
     <ThemeProvider>
+      <UserProvider>
       <Router>
         <AppContent />
       </Router>
+      </UserProvider>
     </ThemeProvider>
   );
 };

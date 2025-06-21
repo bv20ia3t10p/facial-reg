@@ -1,6 +1,40 @@
 version: '3.8'
 
 services:
+  # Federated Learning Coordinator
+  fl-coordinator:
+    build:
+      context: .
+      dockerfile: Dockerfile.coordinator
+    container_name: fl-coordinator
+    ports:
+      - "9000:8000"
+    volumes:
+      - ./api:/app/api
+      - ./models:/app/models
+      - ./cache:/app/cache
+      - ./logs:/app/logs
+      - ./database:/app/database
+      - pip-cache:/root/.cache/pip
+    environment:
+      - PYTHONPATH=/app
+      - TORCH_HOME=/app/cache/torch
+      - NVIDIA_VISIBLE_DEVICES=all
+      - MODEL_PATH=/app/models/best_pretrained_model.pth
+      - DATABASE_URL=sqlite:////app/database/federated.db
+      - JWT_SECRET=coordinator-secret-key
+      - NODE_TYPE=coordinator
+      - FEDERATED_ROUNDS=10
+      - LOG_LEVEL=INFO
+      - ENABLE_DP=true
+      - MAX_DP_EPSILON=100.0
+      - DP_DELTA=1e-5
+      - DP_NOISE_MULTIPLIER=0.2
+      - DP_MAX_GRAD_NORM=5.0
+    command: uvicorn api.src.coordinator:app --host 0.0.0.0 --reload
+    restart: unless-stopped
+    networks:
+      - biometric-net
 
   # Client 1 Biometric API Service
   client1-api:
@@ -12,20 +46,19 @@ services:
       - "8000:8000"
     volumes:
       - ./api:/app/api
-      - ./data/partitioned/client1:/app/data
+      - ./data:/app/data
       - ./models:/app/models
       - ./cache:/app/cache
       - ./logs:/app/logs
-      - ./database/client1.db:/app/database/client1.db
+      - ./database/client1.db:/app/database/facial_reg.db
       - pip-cache:/root/.cache/pip
     environment:
       - PYTHONPATH=/app
       - TORCH_HOME=/app/cache/torch
       - NVIDIA_VISIBLE_DEVICES=all
       - MODEL_PATH=/app/models/best_client1_pretrained_model.pth
-      - CLIENT_ID=client1
-      - DATABASE_URL=sqlite:////app/database/client1.db
-      - JWT_SECRET=your-secret-key-client1
+      - DATABASE_URL=sqlite:////app/database/facial_reg.db
+      - JWT_SECRET=your-secret-key
       - RATE_LIMIT_AUTH=5
       - RATE_LIMIT_DEFAULT=10
       - MAX_WORKERS=1
@@ -39,7 +72,10 @@ services:
       - TORCH_USE_CUDA_DSA=1
       - CUDA_LAUNCH_BLOCKING=1
       - RELOAD=true
-      - EMOTION_API_URL=http://emotion-api:8080
+      - NODE_TYPE=client
+      - CLIENT_ID=client1
+      - COORDINATOR_URL=http://fl-coordinator:8000
+    command: uvicorn api.src.app:app --host 0.0.0.0 --reload
     deploy:
       resources:
         reservations:
@@ -51,6 +87,62 @@ services:
     restart: unless-stopped
     networks:
       - biometric-net
+    depends_on:
+      - fl-coordinator
+
+  # Client 2 Biometric API Service
+  client2-api:
+    build:
+      context: .
+      dockerfile: Dockerfile.client
+    container_name: client2-biometric-api
+    ports:
+      - "8001:8000"
+    volumes:
+      - ./api:/app/api
+      - ./data:/app/data
+      - ./models:/app/models
+      - ./cache:/app/cache
+      - ./logs:/app/logs
+      - ./database/client2.db:/app/database/facial_reg.db
+      - pip-cache:/root/.cache/pip
+    environment:
+      - PYTHONPATH=/app
+      - TORCH_HOME=/app/cache/torch
+      - NVIDIA_VISIBLE_DEVICES=all
+      - MODEL_PATH=/app/models/best_client2_pretrained_model.pth
+      - DATABASE_URL=sqlite:////app/database/facial_reg.db
+      - JWT_SECRET=your-secret-key-client2
+      - RATE_LIMIT_AUTH=5
+      - RATE_LIMIT_DEFAULT=10
+      - MAX_WORKERS=1
+      - LOG_LEVEL=INFO
+      - ENABLE_DP=true
+      - MAX_DP_EPSILON=100.0
+      - DP_DELTA=1e-5
+      - DP_NOISE_MULTIPLIER=0.2
+      - DP_MAX_GRAD_NORM=5.0
+      - CUDA_VISIBLE_DEVICES=0
+      - TORCH_USE_CUDA_DSA=1
+      - CUDA_LAUNCH_BLOCKING=1
+      - RELOAD=true
+      - NODE_TYPE=client
+      - CLIENT_ID=client2
+      - COORDINATOR_URL=http://fl-coordinator:8000
+    command: uvicorn api.src.app:app --host 0.0.0.0 --reload
+    deploy:
+      resources:
+        reservations:
+          devices:
+            - driver: nvidia
+              count: 1
+              capabilities: [gpu]
+    mem_limit: 4g
+    restart: unless-stopped
+    networks:
+      - biometric-net
+    depends_on:
+      - fl-coordinator
 
   # Emotion Analysis API Service
   emotion-api:
@@ -64,6 +156,7 @@ services:
       - ./emo-api/model.pth:/app/model.pth
     environment:
       - CUDA_VISIBLE_DEVICES=0
+      - MODEL_PATH=/app/model.pth
     deploy:
       resources:
         reservations:
@@ -74,96 +167,6 @@ services:
     restart: unless-stopped
     networks:
       - biometric-net
-
-  # # Client 2 Biometric API Service
-  # client2-api:
-  #   build:
-  #     context: .
-  #     dockerfile: Dockerfile.client
-  #     args:
-  #       BASE_IMAGE: pytorch/pytorch:2.7.1-cuda11.8-cudnn9-runtime
-  #   container_name: client2-biometric-api
-  #   ports:
-  #     - "8001:8000"
-  #   volumes:
-  #     - ./data/partitioned/client2:/app/data
-  #     - ./models:/app/models
-  #     - ./cache:/app/cache
-  #     - ./logs:/app/logs
-  #     - ./data/client2.db:/app/data/biometric.db:rw
-  #     - pip-cache:/root/.cache/pip
-  #     - ./api:/app/api
-  #   environment:
-  #     - PYTHONPATH=/app
-  #     - TORCH_HOME=/app/cache/torch
-  #     - NVIDIA_VISIBLE_DEVICES=all
-  #     - MODEL_PATH=/app/models/best_client2_pretrained_model.pth
-  #     - CLIENT_ID=client2
-  #     - DATABASE_URL=sqlite:///data/biometric.db
-  #     - JWT_SECRET=your-secret-key-client2
-  #     - RATE_LIMIT_AUTH=5
-  #     - RATE_LIMIT_DEFAULT=10
-  #     - MAX_WORKERS=1
-  #     - LOG_LEVEL=INFO
-  #     - ENABLE_DP=true
-  #     - MAX_DP_EPSILON=100.0
-  #     - DP_DELTA=1e-5
-  #     - DP_NOISE_MULTIPLIER=0.2
-  #     - DP_MAX_GRAD_NORM=5.0
-  #     - CUDA_VISIBLE_DEVICES=0
-  #     - TORCH_USE_CUDA_DSA=1
-  #     - CUDA_LAUNCH_BLOCKING=1
-  #     - RELOAD=true
-  #   deploy:
-  #     resources:
-  #       reservations:
-  #         devices:
-  #           - driver: nvidia
-  #             count: 1
-  #             capabilities: [gpu]
-  #   mem_limit: 4g
-  #   restart: unless-stopped
-  #   networks:
-  #     - biometric-net
-  #   command: ["python", "-m", "uvicorn", "api.src.client_api:app", "--host", "0.0.0.0", "--port", "8000", "--reload", "--reload-dir", "/app/api"]
-
-  # Training Server (not an API server)
-  # training-server:
-  #   build:
-  #     context: .
-  #     dockerfile: Dockerfile
-  #     args:
-  #       BASE_IMAGE: pytorch/pytorch:2.7.1-cuda11.8-cudnn9-runtime
-  #   container_name: biometric-training-server
-  #   volumes:
-  #     - ./data:/app/data
-  #     - ./models:/app/models
-  #     - ./cache:/app/cache
-  #     - ./logs:/app/logs
-  #   environment:
-  #     - PYTHONPATH=/app
-  #     - TORCH_HOME=/app/cache/torch
-  #     - NVIDIA_VISIBLE_DEVICES=all
-  #     - MODEL_PATH=/app/models/pretrained_model.pth
-  #     - MAX_WORKERS=4
-  #     - LOG_LEVEL=INFO
-  #     - ENABLE_DP=true
-  #     - MAX_DP_EPSILON=100.0
-  #     - DP_DELTA=1e-5
-  #     - DP_NOISE_MULTIPLIER=0.2
-  #     - DP_MAX_GRAD_NORM=5.0
-  #   deploy:
-  #     resources:
-  #       reservations:
-  #         devices:
-  #           - driver: nvidia
-  #             count: 1
-  #             capabilities: [gpu]
-  #   mem_limit: 8g
-  #   restart: unless-stopped
-  #   networks:
-  #     - biometric-net
-  #   command: python -m improved_privacy_training
 
 networks:
   biometric-net:

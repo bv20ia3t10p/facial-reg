@@ -1,410 +1,201 @@
 """
-Authentication routes with privacy-preserving features
+Authentication routes for facial recognition
 """
 
-from fastapi import APIRouter, Depends, HTTPException, File, UploadFile, status, Form
-from fastapi.security import OAuth2PasswordBearer, OAuth2PasswordRequestForm
-from sqlalchemy.orm import Session
-from typing import Dict, Optional
-import torch
-import numpy as np
-from datetime import datetime, timedelta
-import jwt
-from PIL import Image
+import base64
 import io
-import logging
-import requests
-from urllib.parse import urljoin
-import threading
-from concurrent.futures import ThreadPoolExecutor
-import os
 import json
+import logging
+import time
+from datetime import datetime, timedelta
+from pathlib import Path
 
-from ..db.database import get_db, User, AuthenticationLog, log_authentication, SessionLocal
-from ..privacy.privacy_engine import PrivacyEngine
-from ..privacy.federated_manager import FederatedManager
+import numpy as np
+from fastapi import APIRouter, Depends, File, Form, HTTPException, Request, UploadFile, status
+from fastapi.responses import JSONResponse
+from PIL import Image
+from pydantic import BaseModel
+from sqlalchemy.orm import Session
+
+from ..db.database import get_db, User, AuthenticationLog
+from ..services.service_init import biometric_service as biometric_svc
+from ..services.emotion_service import EmotionAnalyzer
+from ..utils.common import generate_auth_log_id
 from ..utils.face_recognition import FaceRecognizer
-from ..utils.security import verify_password, get_password_hash, get_current_user
-from ..services.emotion_service import EmotionAnalyzer, analyze_emotion
+from ..utils.rate_limiter import RateLimiter
+from ..utils.security import (authenticate_user, create_access_token,
+                              get_current_user, get_password_hash)
 
+# Configure logging
+logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 
 # Initialize router
 router = APIRouter()
 
-# Initialize OAuth2
-oauth2_scheme = OAuth2PasswordBearer(tokenUrl="token")
-
-# JWT settings
-SECRET_KEY = "your-secret-key"  # Change in production
-ALGORITHM = "HS256"
-ACCESS_TOKEN_EXPIRE_MINUTES = 30
-
-# Initialize components
+# Initialize face recognizer
 face_recognizer = FaceRecognizer()
-privacy_engine = PrivacyEngine()
-federated_manager = FederatedManager()
 
-# Add emotion API URL configuration
-EMOTION_API_URL = os.getenv("EMOTION_API_URL", "http://emotion-api:8080")  # Use container name from docker-compose
+# Rate limiter for authentication attempts
+auth_rate_limiter = RateLimiter(window_size=60)  # 60 seconds window
 
-logger.info(f"Using emotion API at: {EMOTION_API_URL}")
+# Initialize emotion analyzer
+emotion_analyzer = EmotionAnalyzer()
 
-# Thread pool for async tasks
-thread_pool = ThreadPoolExecutor(max_workers=4)
-
-def create_access_token(data: dict, expires_delta: Optional[timedelta] = None):
-    """Create JWT token"""
-    to_encode = data.copy()
-    if expires_delta:
-        expire = datetime.utcnow() + expires_delta
-    else:
-        expire = datetime.utcnow() + timedelta(minutes=15)
-    to_encode.update({"exp": expire})
-    encoded_jwt = jwt.encode(to_encode, SECRET_KEY, algorithm=ALGORITHM)
-    return encoded_jwt
-
-def analyze_emotion(image_data: bytes) -> Dict:
-    """Make call to emotion API"""
+async def process_authentication(db, image_data, email=None, password=None, device_info=""):
+    """
+    Process an authentication request using facial recognition and/or password
+    """
     try:
-        logger.info(f"Making request to emotion API at {EMOTION_API_URL}")
+        # Predict identity using facial recognition
+        prediction = biometric_svc.predict_identity(image_data, db)
+        user_id = prediction['user_id']
+        confidence = prediction['confidence']
+        features = prediction.get('features', None)
         
-        # Create multipart form data
-        files = {
-            'file': ('face.jpg', image_data, 'image/jpeg')
-        }
+        # Get threshold from config
+        threshold = 0.7  # Default threshold
         
-        # Make request to emotion API
-        logger.info("Sending request to emotion API...")
-        response = requests.post(urljoin(EMOTION_API_URL, "/predict"), files=files)
+        # Get user from database
+        user = db.query(User).filter(User.id == user_id).first()
         
-        if response.status_code != 200:
-            logger.warning(f"Emotion API returned status {response.status_code}")
-            logger.warning(f"Response body: {response.text}")
-            return None
-            
-        result = response.json()
-        logger.info(f"Received emotion analysis result: {result}")
-        return result
-        
-    except requests.RequestException as e:
-        logger.error(f"Failed to connect to emotion API: {e}")
-        return None
-    except Exception as e:
-        logger.error(f"Emotion analysis failed: {e}")
-        return None
-
-def update_emotion_data(db: Session, log_id: str, emotion_data: Dict):
-    """Update authentication log with emotion data in a separate thread"""
-    # Create a new session for this update
-    new_session = SessionLocal()
-    try:
-        logger.info(f"Updating emotion data for auth log {log_id}")
-        log_entry = new_session.query(AuthenticationLog).filter(AuthenticationLog.id == log_id).first()
-        if log_entry:
-            log_entry.emotion_data = emotion_data
-            new_session.commit()
-            logger.info(f"Successfully updated emotion data: {emotion_data}")
-        else:
-            logger.warning(f"Auth log {log_id} not found")
-    except Exception as e:
-        logger.error(f"Failed to update emotion data: {e}")
-        if new_session.is_active:
-            new_session.rollback()
-    finally:
-        new_session.close()
-
-@router.post("/face")
-async def face_authentication(
-    image: UploadFile = File(...),
-    db: Session = Depends(get_db)
-):
-    """Face recognition authentication with privacy preservation"""
-    try:
-        # Read image data once
-        contents = await image.read()
-        if not contents:
-            raise HTTPException(
-                status_code=status.HTTP_400_BAD_REQUEST,
-                detail="Empty image file"
-            )
-        
-        # Start emotion analysis in a thread
-        emotion_future = thread_pool.submit(analyze_emotion, contents)
-        
-        try:
-            pil_image = Image.open(io.BytesIO(contents))
-            pil_image.verify()  # Verify it's a valid image
-            pil_image = Image.open(io.BytesIO(contents))  # Reopen after verify
-        except Exception as e:
-            raise HTTPException(
-                status_code=status.HTTP_400_BAD_REQUEST,
-                detail=f"Invalid image file: {str(e)}"
-            )
-        
-        # Convert to tensor
-        try:
-            image_tensor = face_recognizer.preprocess_image(pil_image)
-        except Exception as e:
-            logger.error(f"Image preprocessing failed: {e}")
-            raise HTTPException(
-                status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
-                detail="Failed to process image"
-            )
-        
-        # Extract features
-        try:
-            with torch.no_grad():
-                features = face_recognizer.extract_features(image_tensor)
-        except Exception as e:
-            logger.error(f"Feature extraction failed: {e}")
-            raise HTTPException(
-                status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
-                detail="Failed to extract face features"
-            )
-        
-        # Apply privacy features only if available
-        try:
-            if privacy_engine.context is not None:
-                # Apply differential privacy
-                noised_features = privacy_engine.add_noise_to_gradients(features)
-                # Encrypt features
-                encrypted_features = privacy_engine.encrypt_biometric(noised_features)
-            else:
-                # Skip privacy features if not initialized
-                logger.warning("Privacy features not initialized, proceeding without encryption")
-                noised_features = features
-                encrypted_features = None
-        except Exception as e:
-            logger.warning(f"Privacy features failed: {e}, proceeding without encryption")
-            noised_features = features
-            encrypted_features = None
-        
-        # Find matching user
-        confidence = 0.0
-        matched_user = None
-        
-        try:
-            for user in db.query(User).all():
-                if user.face_encoding:
-                    try:
-                        # Decrypt stored features if encrypted
-                        if privacy_engine.context is not None and encrypted_features is not None:
-                            stored_features = privacy_engine.decrypt_biometric(user.face_encoding)
-                        else:
-                            # Load features directly if not encrypted
-                            stored_features = face_recognizer.load_features(user.face_encoding)
-                        
-                        # Compute similarity
-                        similarity = face_recognizer.compute_similarity(
-                            noised_features,
-                            stored_features
-                        )
-                        
-                        if similarity > confidence:
-                            confidence = similarity
-                            matched_user = user
-                    except Exception as e:
-                        logger.warning(f"Failed to process user {user.id}: {e}")
-                        continue
-        except Exception as e:
-            logger.error(f"User matching failed: {e}")
-            raise HTTPException(
-                status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
-                detail="Failed to match user"
-            )
-        
-        # Authentication result
-        success = confidence >= 0.85
-        
-        # Get emotion analysis results
-        try:
-            emotion_result = await emotion_future
-            if emotion_result:
-                logger.info(f"Got emotion analysis result: {emotion_result}")
-            else:
-                logger.warning("No emotion analysis results")
-                emotion_result = {
-                    "happiness": 0.0,
-                    "neutral": 1.0,
-                    "surprise": 0.0,
-                    "sadness": 0.0,
-                    "anger": 0.0,
-                    "disgust": 0.0,
-                    "fear": 0.0
-                }
-        except Exception as e:
-            logger.error(f"Failed to get emotion analysis: {e}")
-            emotion_result = {
-                "happiness": 0.0,
-                "neutral": 1.0,
-                "surprise": 0.0,
-                "sadness": 0.0,
-                "anger": 0.0,
-                "disgust": 0.0,
-                "fear": 0.0
+        if not user:
+            logger.error(f"User with ID {user_id} not found in database")
+            return {
+                "success": False, 
+                "error": f"User with ID {user_id} not found",
+                "authenticated_at": datetime.utcnow().isoformat()
             }
         
-        # Create authentication log entry
-        try:
-            log_entry = AuthenticationLog(
-                user_id=matched_user.id if matched_user else None,
-                success=success,
-                confidence=float(confidence),
-                emotion_data=json.dumps(emotion_result),
-                captured_image=encrypted_features.serialize() if encrypted_features else None,
-                device_info=image.filename  # Store original filename as device info
-            )
-            db.add(log_entry)
-            db.commit()
-            db.refresh(log_entry)
-            logger.info(f"Created authentication log entry with ID: {log_entry.id}")
-            
-        except Exception as e:
-            logger.warning(f"Failed to log authentication: {e}")
-            db.rollback()
-        
-        # Update user if successful
-        if success and matched_user:
-            try:
-                matched_user.last_authenticated = datetime.utcnow()
-                db.commit()
-                
-                # Create access token
-                access_token_expires = timedelta(minutes=ACCESS_TOKEN_EXPIRE_MINUTES)
-                access_token = create_access_token(
-                    data={"sub": str(matched_user.id)},
-                    expires_delta=access_token_expires
-                )
-                
-                response = {
-                    "success": True,
-                    "confidence": float(confidence),
-                    "user": {
-                        "id": str(matched_user.id),
-                        "name": matched_user.name,
-                        "email": matched_user.email,
-                        "department": matched_user.department,
-                        "role": matched_user.role
-                    },
-                    "access_token": access_token,
-                    "token_type": "bearer",
-                    "emotions": emotion_result
-                }
-                
-                return response
-            except Exception as e:
-                logger.error(f"Failed to update user or create token: {e}")
-                raise HTTPException(
-                    status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
-                    detail="Failed to complete authentication"
-                )
-        
-        raise HTTPException(
-            status_code=status.HTTP_401_UNAUTHORIZED,
-            detail="Authentication failed"
+        # Create authentication log
+        auth_time = datetime.utcnow()
+        auth_log = AuthenticationLog(
+            id=generate_auth_log_id(),
+            user_id=user_id,
+            success=confidence >= threshold,  # Set success based on threshold
+            confidence=confidence,
+            threshold=threshold,
+            device_info=device_info,
+            created_at=auth_time
         )
+        
+        # Analyze emotion if available
+        try:
+            emotion_data = await emotion_analyzer.analyze_emotion(image_data)
+            if emotion_data:
+                auth_log.emotion_data = json.dumps(emotion_data)
+        except Exception as e:
+            logger.warning(f"Emotion analysis failed: {e}")
+        
+        # Save the authentication log
+        db.add(auth_log)
+        db.commit()
+        
+        # Generate a token that includes user information
+        token_data = {
+            "sub": user_id,  # Subject (user id)
+            "name": user.name,
+            "email": user.email,
+            "department": user.department,
+            "role": user.role
+        }
+        
+        # Create access token valid for 24 hours
+        access_token = create_access_token(
+            data=token_data,
+            expires_delta=timedelta(hours=24)
+        )
+        
+        # Update user's last_authenticated timestamp
+        user.last_authenticated = auth_time
+        db.commit()
+        
+        # Return the authentication result
+        return {
+            "success": True,
+            "user_id": user_id,
+            "name": user.name,
+            "email": user.email,
+            "department": user.department,
+            "role": user.role,
+            "confidence": confidence,
+            "threshold": threshold,
+            "meets_threshold": confidence >= threshold,
+            "authenticated_at": auth_log.created_at.isoformat(),
+            "token": access_token,
+            "emotion_data": json.loads(auth_log.emotion_data) if auth_log.emotion_data else None
+        }
+    except Exception as e:
+        logger.error(f"Authentication processing failed: {e}")
+        raise
+
+@router.post("/authenticate")
+async def authenticate(
+    request: Request,
+    db: Session = Depends(get_db),
+    image: UploadFile = File(...),
+    email: str = Form(None),
+    password: str = Form(None),
+    device_info: str = Form(""),
+):
+    """
+    Authenticate a user using facial recognition and/or password
+    """
+    try:
+        # Rate limit check
+        client_ip = request.client.host
+        if auth_rate_limiter.is_blocked(client_ip, limit_type="auth", max_requests=5):
+            raise HTTPException(
+                status_code=429,
+                detail="Too many authentication attempts. Please try again later."
+            )
+        
+        # Read image
+        image_data = await image.read()
+        
+        # Check if biometric service is initialized
+        if biometric_svc is None:
+            raise HTTPException(
+                status_code=500,
+                detail="Biometric service not available"
+            )
+        
+        # Process the image for face recognition
+        result = await process_authentication(db, image_data, email, password, device_info)
+        
+        # Return the authentication result
+        return JSONResponse(content=result)
         
     except HTTPException:
         raise
     except Exception as e:
-        logger.error(f"Face authentication failed: {e}", exc_info=True)
-        raise HTTPException(
-            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
-            detail=str(e)
+        logger.error(f"Authentication error: {str(e)}")
+        return JSONResponse(
+            status_code=500,
+            content={"success": False, "error": f"Authentication error: {str(e)}"}
         )
 
-@router.post("/verify")
-async def verify_credentials(
-    form_data: OAuth2PasswordRequestForm = Depends(),
-    db: Session = Depends(get_db)
-):
-    """Verify username/password credentials"""
+async def process_emotion_analysis(image_data: bytes, auth_id: str, db: Session):
+    """Process emotion analysis in the background and update the auth log"""
     try:
-        user = db.query(User).filter(User.email == form_data.username).first()
-        if not user or not verify_password(form_data.password, user.password_hash):
-            raise HTTPException(
-                status_code=status.HTTP_401_UNAUTHORIZED,
-                detail="Incorrect email or password"
-            )
+        logger.info(f"Starting emotion analysis for auth_id: {auth_id}")
         
-        # Create access token
-        access_token_expires = timedelta(minutes=ACCESS_TOKEN_EXPIRE_MINUTES)
-        access_token = create_access_token(
-            data={"sub": str(user.id)},
-            expires_delta=access_token_expires
-        )
+        # Analyze emotion
+        emotion_result = await emotion_analyzer.analyze_emotion(image_data)
         
-        return {
-            "access_token": access_token,
-            "token_type": "bearer",
-            "user": {
-                "id": str(user.id),
-                "name": user.name,
-                "email": user.email,
-                "department": user.department,
-                "role": user.role
-            }
-        }
-        
+        if emotion_result:
+            logger.info(f"Emotion analysis result for auth_id {auth_id}: {emotion_result}")
+            
+            # Update auth log with emotion data
+            auth_log = db.query(AuthenticationLog).filter(AuthenticationLog.id == auth_id).first()
+            if auth_log:
+                auth_log.emotion_data = emotion_result
+                db.commit()
+                logger.info(f"Updated auth log {auth_id} with emotion data")
+            else:
+                logger.error(f"Auth log {auth_id} not found for emotion update")
+        else:
+            logger.warning(f"No emotion data returned for auth_id: {auth_id}")
+            
     except Exception as e:
-        logger.error(f"Credential verification failed: {e}")
-        raise HTTPException(
-            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
-            detail=str(e)
-        )
-
-@router.post("/register")
-async def register_user(
-    image: UploadFile = File(...),
-    name: str = Form(...),
-    email: str = Form(...),
-    password: str = Form(...),
-    department: str = Form(...),
-    role: str = Form(...),
-    db: Session = Depends(get_db)
-):
-    """Register new user with biometric data"""
-    try:
-        # Check if user exists
-        if db.query(User).filter(User.email == email).first():
-            raise HTTPException(
-                status_code=status.HTTP_400_BAD_REQUEST,
-                detail="Email already registered"
-            )
-        
-        # Process face image
-        contents = await image.read()
-        pil_image = Image.open(io.BytesIO(contents))
-        image_tensor = face_recognizer.preprocess_image(pil_image)
-        
-        # Extract and encrypt features
-        with torch.no_grad():
-            features = face_recognizer.extract_features(image_tensor)
-            encrypted_features = privacy_engine.encrypt_biometric(features)
-        
-        # Create user
-        user = User(
-            name=name,
-            email=email,
-            password_hash=get_password_hash(password),
-            department=department,
-            role=role,
-            face_encoding=encrypted_features.serialize()
-        )
-        db.add(user)
-        db.commit()
-        db.refresh(user)
-        
-        return {
-            "success": True,
-            "message": "User registered successfully",
-            "user_id": str(user.id)
-        }
-        
-    except Exception as e:
-        logger.error(f"User registration failed: {e}")
-        raise HTTPException(
-            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
-            detail=str(e)
-        ) 
+        logger.error(f"Error in emotion analysis background task: {str(e)}") 

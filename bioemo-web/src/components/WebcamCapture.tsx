@@ -1,7 +1,8 @@
-import React, { useCallback, useRef, useState } from 'react';
+import React, { useCallback, useRef, useState, useEffect } from 'react';
 import Webcam from 'react-webcam';
-import { LoadingOutlined, CameraOutlined } from '@ant-design/icons';
-import { Typography, Button } from 'antd';
+import { LoadingOutlined, CameraOutlined, CheckOutlined } from '@ant-design/icons';
+import { Typography, Button, Spin } from 'antd';
+import { useTheme } from '../contexts/ThemeContext';
 
 const { Text } = Typography;
 
@@ -14,12 +15,38 @@ export function WebcamCapture({ onCapture, isScanning }: WebcamCaptureProps) {
   const webcamRef = useRef<Webcam>(null);
   const [isCameraReady, setIsCameraReady] = useState(false);
   const [error, setError] = useState<string | null>(null);
+  const [faceDetected, setFaceDetected] = useState(false);
+  const [showFaceScan, setShowFaceScan] = useState(false);
+  const { isDarkMode } = useTheme();
 
   const videoConstraints = {
     width: 1280,
     height: 720,
     facingMode: "user"
   };
+
+  // Simulate face detection with a timer
+  useEffect(() => {
+    if (isCameraReady && !isScanning) {
+      const timer = setTimeout(() => {
+        setFaceDetected(true);
+      }, 1500);
+      
+      return () => clearTimeout(timer);
+    }
+  }, [isCameraReady, isScanning]);
+
+  // Show face scan animation
+  useEffect(() => {
+    if (isCameraReady && !isScanning) {
+      setShowFaceScan(true);
+      const timer = setTimeout(() => {
+        setShowFaceScan(false);
+      }, 3000);
+      
+      return () => clearTimeout(timer);
+    }
+  }, [isCameraReady, isScanning]);
 
   const capture = useCallback(() => {
     if (!webcamRef.current) {
@@ -94,10 +121,12 @@ export function WebcamCapture({ onCapture, isScanning }: WebcamCaptureProps) {
     <div style={{
       width: '100%',
       aspectRatio: '16/9',
-      backgroundColor: '#f0f2f5',
-      borderRadius: '8px',
+      backgroundColor: isDarkMode ? '#1f1f1f' : '#f0f2f5',
+      borderRadius: '12px',
       overflow: 'hidden',
       position: 'relative',
+      boxShadow: '0 4px 12px rgba(0, 0, 0, 0.1)',
+      border: `1px solid ${isDarkMode ? '#333' : '#e0e0e0'}`,
     }}>
       <Webcam
         audio={false}
@@ -113,6 +142,83 @@ export function WebcamCapture({ onCapture, isScanning }: WebcamCaptureProps) {
         }}
       />
       
+      {/* Face detection overlay */}
+      {isCameraReady && !isScanning && showFaceScan && (
+        <div style={{
+          position: 'absolute',
+          top: 0,
+          left: 0,
+          right: 0,
+          bottom: 0,
+          display: 'flex',
+          alignItems: 'center',
+          justifyContent: 'center',
+          pointerEvents: 'none',
+        }}>
+          <div style={{
+            width: '280px',
+            height: '280px',
+            borderRadius: '50%',
+            border: '2px solid #1DA1F2',
+            animation: 'pulse 2s infinite',
+            position: 'relative',
+          }}>
+            {/* Scanning lines */}
+            <div style={{
+              position: 'absolute',
+              top: '0',
+              left: '0',
+              right: '0',
+              height: '2px',
+              background: 'linear-gradient(90deg, transparent, #1DA1F2, transparent)',
+              animation: 'scanLine 2s linear infinite',
+              opacity: 0.7,
+            }} />
+            
+            {/* Corner markers */}
+            {[
+              { top: '-5px', left: '-5px' },
+              { top: '-5px', right: '-5px' },
+              { bottom: '-5px', left: '-5px' },
+              { bottom: '-5px', right: '-5px' },
+            ].map((pos, idx) => (
+              <div 
+                key={idx}
+                style={{
+                  position: 'absolute',
+                  width: '20px',
+                  height: '20px',
+                  border: '2px solid #1DA1F2',
+                  borderRadius: '50%',
+                  background: 'rgba(29, 161, 242, 0.2)',
+                  ...pos
+                }}
+              />
+            ))}
+          </div>
+        </div>
+      )}
+      
+      {/* Face detected indicator */}
+      {faceDetected && !isScanning && (
+        <div style={{
+          position: 'absolute',
+          top: '16px',
+          right: '16px',
+          background: 'rgba(82, 196, 26, 0.8)',
+          color: 'white',
+          padding: '4px 12px',
+          borderRadius: '16px',
+          display: 'flex',
+          alignItems: 'center',
+          gap: '4px',
+          fontSize: '14px',
+          boxShadow: '0 2px 8px rgba(0, 0, 0, 0.15)',
+        }}>
+          <CheckOutlined /> Face Detected
+        </div>
+      )}
+      
       {isScanning && (
         <div style={{
           position: 'absolute',
@@ -123,9 +229,10 @@ export function WebcamCapture({ onCapture, isScanning }: WebcamCaptureProps) {
           display: 'flex',
           alignItems: 'center',
           justifyContent: 'center',
-          backgroundColor: 'rgba(0, 0, 0, 0.1)',
+          backgroundColor: 'rgba(0, 0, 0, 0.5)',
+          backdropFilter: 'blur(4px)',
         }}>
-          <LoadingOutlined style={{ fontSize: 48, color: '#1890ff' }} spin />
+          <Spin indicator={<LoadingOutlined style={{ fontSize: 48, color: '#1DA1F2' }} spin />} />
         </div>
       )}
 
@@ -136,10 +243,14 @@ export function WebcamCapture({ onCapture, isScanning }: WebcamCaptureProps) {
           left: '50%',
           transform: 'translate(-50%, -50%)',
           textAlign: 'center',
+          padding: '20px',
+          background: isDarkMode ? 'rgba(0, 0, 0, 0.7)' : 'rgba(255, 255, 255, 0.9)',
+          borderRadius: '12px',
+          boxShadow: '0 4px 12px rgba(0, 0, 0, 0.15)',
         }}>
           <CameraOutlined style={{ fontSize: 48, color: '#8c8c8c' }} />
           <Text type="secondary" style={{ display: 'block', marginTop: '8px' }}>
-            {error || 'Camera feed will appear here'}
+            {error || 'Initializing camera...'}
           </Text>
         </div>
       )}
@@ -150,6 +261,9 @@ export function WebcamCapture({ onCapture, isScanning }: WebcamCaptureProps) {
           bottom: '16px',
           left: '50%',
           transform: 'translateX(-50%)',
+          display: 'flex',
+          flexDirection: 'column',
+          alignItems: 'center',
         }}>
           <Button
             type="primary"
@@ -157,21 +271,65 @@ export function WebcamCapture({ onCapture, isScanning }: WebcamCaptureProps) {
             onClick={capture}
             size="large"
             style={{
-              height: '48px',
-              width: '48px',
-              borderRadius: '24px',
+              height: '64px',
+              width: '64px',
+              borderRadius: '32px',
               display: 'flex',
               alignItems: 'center',
               justifyContent: 'center',
+              fontSize: '24px',
+              boxShadow: '0 4px 12px rgba(0, 0, 0, 0.15)',
+              border: '4px solid white',
             }}
           />
           {error && (
-            <Text type="danger" style={{ display: 'block', marginTop: '8px', textAlign: 'center' }}>
+            <Text type="danger" style={{ 
+              display: 'block', 
+              marginTop: '12px', 
+              textAlign: 'center',
+              background: isDarkMode ? 'rgba(0, 0, 0, 0.7)' : 'rgba(255, 255, 255, 0.9)',
+              padding: '4px 12px',
+              borderRadius: '4px',
+            }}>
               {error}
             </Text>
           )}
         </div>
       )}
+
+      {/* Add CSS animations */}
+      <style>
+        {`
+        @keyframes pulse {
+          0% {
+            transform: scale(0.95);
+            box-shadow: 0 0 0 0 rgba(29, 161, 242, 0.7);
+          }
+          
+          70% {
+            transform: scale(1);
+            box-shadow: 0 0 0 10px rgba(29, 161, 242, 0);
+          }
+          
+          100% {
+            transform: scale(0.95);
+            box-shadow: 0 0 0 0 rgba(29, 161, 242, 0);
+          }
+        }
+        
+        @keyframes scanLine {
+          0% {
+            top: 0%;
+          }
+          50% {
+            top: 100%;
+          }
+          100% {
+            top: 0%;
+          }
+        }
+        `}
+      </style>
     </div>
   );
 } 

@@ -9,6 +9,8 @@ from typing import Dict, List, Optional
 from datetime import datetime, timedelta
 import logging
 import json
+import uuid
+import pytz
 
 from ..db.database import get_db, User, AuthenticationLog
 from ..utils.security import get_current_user
@@ -16,7 +18,183 @@ from ..utils.security import get_current_user
 logger = logging.getLogger(__name__)
 
 # Initialize router
-router = APIRouter(prefix="/analytics", tags=["analytics"])
+router = APIRouter(tags=["analytics"])
+
+def normalize_emotion_data(emotion_data: Dict) -> Dict[str, float]:
+    """Normalize emotion data to a consistent format with numeric values"""
+    # Map of emotion name variations to standard names
+    emotion_name_map = {
+        'happy': 'happiness',
+        'sad': 'sadness',
+        'angry': 'anger',
+        'surprised': 'surprise',
+        'fearful': 'fear',
+        'disgusted': 'disgust',
+        'neutral': 'neutral'
+    }
+    
+    # Set of all standard emotion names
+    standard_emotions = set(emotion_name_map.values())
+    
+    normalized = {}
+    
+    # Skip processing if emotion_data is not a dictionary
+    if not isinstance(emotion_data, dict):
+        logger.warning(f"Invalid emotion data format: {type(emotion_data)}")
+        return {emotion: 0.0 for emotion in standard_emotions}
+    
+    for key, value in emotion_data.items():
+        # Skip timestamp-like values
+        if isinstance(value, str) and ('T' in value and '+' in value and value.count(':') >= 2):
+            logger.debug(f"Skipping timestamp-like value: {value}")
+            continue
+            
+        # Normalize emotion name
+        emotion_name = emotion_name_map.get(key.lower(), key.lower())
+        
+        # Handle different value formats
+        if isinstance(value, (int, float)):
+            normalized[emotion_name] = float(value)
+        elif isinstance(value, str):
+            # If the value is a string emotion name, treat it as 1.0
+            if value.lower() in emotion_name_map:
+                normalized[emotion_name_map[value.lower()]] = 1.0
+            # If the value is the same as the key (e.g., "sadness": "sadness"), treat it as 1.0
+            elif value.lower() == key.lower() or value.lower() == emotion_name:
+                normalized[emotion_name] = 1.0
+            # If the value is a standard emotion name, treat it as 1.0
+            elif value.lower() in standard_emotions:
+                normalized[value.lower()] = 1.0
+            else:
+                try:
+                    normalized[emotion_name] = float(value)
+                except (ValueError, TypeError):
+                    logger.warning(f"Could not convert emotion value to float: {value}")
+                    # Instead of skipping, set a default value of 1.0 for string emotions
+                    normalized[emotion_name] = 1.0
+    
+    # Ensure we have all emotion categories with at least 0
+    for standard_emotion in standard_emotions:
+        if standard_emotion not in normalized:
+            normalized[standard_emotion] = 0.0
+    
+    return normalized
+
+def calculate_wellbeing_metrics(emotion_data: Dict[str, float]) -> Dict[str, float]:
+    """Calculate wellbeing metrics from emotion data"""
+    # Convert emotion values to float and normalize
+    total = sum(float(v) for v in emotion_data.values())
+    if total == 0:
+        return {
+            "stressLevel": 0,
+            "jobSatisfaction": 0,
+            "emotionalBalance": 0,
+            "wellbeingScore": 0
+        }
+    
+    normalized = {k: float(v)/total for k, v in emotion_data.items()}
+    
+    # Calculate metrics
+    stress_level = (
+        normalized.get('anger', 0) * 1.0 +
+        normalized.get('fear', 0) * 0.8 +
+        normalized.get('disgust', 0) * 0.6 +
+        normalized.get('sadness', 0) * 0.4
+    ) * 100
+    
+    job_satisfaction = (
+        normalized.get('happiness', 0) * 1.0 +
+        normalized.get('neutral', 0) * 0.5
+    ) * 100
+    
+    emotional_balance = (
+        normalized.get('neutral', 0) * 1.0 +
+        normalized.get('happiness', 0) * 0.8 -
+        normalized.get('anger', 0) * 0.6 -
+        normalized.get('fear', 0) * 0.4
+    ) * 100
+    
+    wellbeing_score = (
+        (100 - stress_level) * 0.3 +
+        job_satisfaction * 0.4 +
+        (emotional_balance + 100) * 0.3 / 2
+    )
+    
+    return {
+        "stressLevel": min(100, max(0, stress_level)),
+        "jobSatisfaction": min(100, max(0, job_satisfaction)),
+        "emotionalBalance": min(100, max(0, emotional_balance)),
+        "wellbeingScore": min(100, max(0, wellbeing_score))
+    }
+
+def generate_alerts(dept_analytics: List[Dict]) -> List[Dict]:
+    """Generate alerts based on department analytics"""
+    alerts = []
+    for dept in dept_analytics:
+        metrics = dept['metrics']
+        timestamp = datetime.now(pytz.UTC).isoformat()
+        
+        # Check stress levels
+        if metrics['stressLevel'] > 70:
+            alerts.append({
+                "id": str(uuid.uuid4()),
+                "type": "stress",
+                "severity": "high",
+                "department": dept['department'],
+                "message": f"High stress levels detected in {dept['department']} department",
+                "timestamp": timestamp
+            })
+        elif metrics['stressLevel'] > 50:
+            alerts.append({
+                "id": str(uuid.uuid4()),
+                "type": "stress",
+                "severity": "medium",
+                "department": dept['department'],
+                "message": f"Moderate stress levels detected in {dept['department']} department",
+                "timestamp": timestamp
+            })
+        
+        # Check job satisfaction
+        if metrics['jobSatisfaction'] < 30:
+            alerts.append({
+                "id": str(uuid.uuid4()),
+                "type": "satisfaction",
+                "severity": "high",
+                "department": dept['department'],
+                "message": f"Low job satisfaction detected in {dept['department']} department",
+                "timestamp": timestamp
+            })
+        elif metrics['jobSatisfaction'] < 50:
+            alerts.append({
+                "id": str(uuid.uuid4()),
+                "type": "satisfaction",
+                "severity": "medium",
+                "department": dept['department'],
+                "message": f"Declining job satisfaction in {dept['department']} department",
+                "timestamp": timestamp
+            })
+        
+        # Check overall wellbeing
+        if metrics['wellbeingScore'] < 40:
+            alerts.append({
+                "id": str(uuid.uuid4()),
+                "type": "wellbeing",
+                "severity": "high",
+                "department": dept['department'],
+                "message": f"Critical wellbeing score in {dept['department']} department",
+                "timestamp": timestamp
+            })
+        elif metrics['wellbeingScore'] < 60:
+            alerts.append({
+                "id": str(uuid.uuid4()),
+                "type": "wellbeing",
+                "severity": "medium",
+                "department": dept['department'],
+                "message": f"Below average wellbeing score in {dept['department']} department",
+                "timestamp": timestamp
+            })
+    
+    return alerts
 
 @router.get("/hr")
 async def get_hr_analytics(
@@ -25,113 +203,229 @@ async def get_hr_analytics(
 ):
     """Get HR analytics data"""
     try:
+        logger.info(f"Received HR analytics request from user: {current_user.id if current_user else 'Unknown'}")
+        logger.info(f"User department: {current_user.department if current_user else 'Unknown'}")
+        logger.info(f"User role: {current_user.role if current_user else 'Unknown'}")
+        
+        # Check if user is in HR department or has HR role
+        is_hr_user = False
+        if current_user:
+            department = current_user.department.lower() if current_user.department else ""
+            role = current_user.role.lower() if current_user.role else ""
+            
+            if ('hr' in department or 'human resources' in department or 
+                'hr' in role or 'human resources' in role):
+                is_hr_user = True
+        
+        if not current_user or not is_hr_user:
+            logger.warning(f"Access denied: User {current_user.id if current_user else 'Unknown'} not in HR department/role")
+            raise HTTPException(
+                status_code=status.HTTP_403_FORBIDDEN,
+                detail="Only HR department members can access this data"
+            )
+        
         # Get all authentication logs from the past 7 days
-        week_ago = datetime.utcnow() - timedelta(days=7)
+        now = datetime.now(pytz.UTC)
+        week_ago = now - timedelta(days=7)
         logs = db.query(AuthenticationLog).filter(
             AuthenticationLog.created_at >= week_ago
         ).all()
+        logger.info(f"Found {len(logs)} authentication logs in the past 7 days")
         
-        # Calculate emotion distribution
-        emotion_counts = {}
-        total_logs = len(logs)
-        
+        # Calculate overall emotion distribution
+        overall_emotions = {}
         for log in logs:
-            if log.emotion:
-                emotion_counts[log.emotion] = emotion_counts.get(log.emotion, 0) + 1
+            if log.emotion_data:
+                try:
+                    # Handle different emotion_data formats - SQLAlchemy already converts JSON column to dict
+                    emotion_data = log.emotion_data
+                    
+                    # Skip if emotion_data is not in the expected format
+                    if not isinstance(emotion_data, dict):
+                        logger.warning(f"Unexpected emotion_data format: {type(emotion_data)}")
+                        # Try to convert to dict if it's a simple string
+                        if isinstance(emotion_data, str) and emotion_data.strip():
+                            if emotion_data.strip().lower() in ['happiness', 'sadness', 'anger', 'fear', 'disgust', 'surprise', 'neutral']:
+                                emotion_data = {emotion_data.strip().lower(): 1.0}
+                            else:
+                                try:
+                                    emotion_data = json.loads(emotion_data)
+                                except json.JSONDecodeError:
+                                    logger.warning(f"Failed to parse emotion data as JSON: {emotion_data[:30]}...")
+                                    continue
+                        else:
+                            continue
+                    
+                    normalized_emotions = normalize_emotion_data(emotion_data)
+                    for emotion, value in normalized_emotions.items():
+                        overall_emotions[emotion] = overall_emotions.get(emotion, 0) + value
+                except Exception as e:
+                    logger.warning(f"Error processing emotion data: {str(e)}")
+                    continue
         
-        emotion_distribution = [
-            {
-                "emotion": emotion,
-                "percentage": (count / total_logs) * 100 if total_logs > 0 else 0
-            }
-            for emotion, count in emotion_counts.items()
-        ]
+        # Calculate overall wellbeing metrics
+        overall_wellbeing = calculate_wellbeing_metrics(overall_emotions)
         
         # Get department analytics
         departments = db.query(User.department).distinct().all()
+        logger.info(f"Found {len(departments)} distinct departments")
         department_analytics = []
         
         for (dept,) in departments:
-            dept_logs = [log for log in logs if log.user and log.user.department == dept]
-            dept_total = len(dept_logs)
+            if not dept:
+                continue
+                
+            dept_users = db.query(User).filter(User.department == dept).all()
+            dept_user_ids = [user.id for user in dept_users]
+            logger.info(f"Department {dept}: Found {len(dept_users)} users")
+            
+            # Get authentication logs for department users
+            dept_logs = [log for log in logs if log.user_id in dept_user_ids]
+            total_dept_logs = len(dept_logs)
+            logger.info(f"Department {dept}: Found {total_dept_logs} authentication logs")
+            
+            # Calculate department emotion distribution
+            dept_emotions = {}
+            for log in dept_logs:
+                if log.emotion_data:
+                    try:
+                        # Handle different emotion_data formats - SQLAlchemy already converts JSON column to dict
+                        emotion_data = log.emotion_data
+                        
+                        # Skip if emotion_data is not in the expected format
+                        if not isinstance(emotion_data, dict):
+                            logger.warning(f"Unexpected emotion_data format for department {dept}: {type(emotion_data)}")
+                            # Try to convert to dict if it's a simple string
+                            if isinstance(emotion_data, str) and emotion_data.strip():
+                                if emotion_data.strip().lower() in ['happiness', 'sadness', 'anger', 'fear', 'disgust', 'surprise', 'neutral']:
+                                    emotion_data = {emotion_data.strip().lower(): 1.0}
+                                else:
+                                    try:
+                                        emotion_data = json.loads(emotion_data)
+                                    except json.JSONDecodeError:
+                                        logger.warning(f"Failed to parse emotion data as JSON for department {dept}: {emotion_data[:30]}...")
+                                        continue
+                            else:
+                                continue
+                        
+                        normalized_emotions = normalize_emotion_data(emotion_data)
+                        for emotion, value in normalized_emotions.items():
+                            dept_emotions[emotion] = dept_emotions.get(emotion, 0) + value
+                    except Exception as e:
+                        logger.warning(f"Error processing emotion data for department {dept}: {str(e)}")
+                        continue
             
             # Calculate department metrics
-            stress_level = sum(1 for log in dept_logs if log.emotion == 'stressed') / dept_total * 100 if dept_total > 0 else 0
-            satisfaction = sum(1 for log in dept_logs if log.emotion in ['happy', 'neutral']) / dept_total * 100 if dept_total > 0 else 0
-            emotional_balance = sum(1 for log in dept_logs if log.emotion not in ['stressed', 'angry', 'sad']) / dept_total * 100 if dept_total > 0 else 0
+            dept_metrics = calculate_wellbeing_metrics(dept_emotions)
+            
+            # Create trend data (simplified - just current state for now)
+            trend_data = [{
+                "timestamp": now.isoformat(),
+                "metrics": dept_metrics
+            }]
             
             department_analytics.append({
                 "department": dept,
-                "metrics": {
-                    "stressLevel": stress_level,
-                    "jobSatisfaction": satisfaction,
-                    "emotionalBalance": emotional_balance,
-                    "wellbeingScore": (satisfaction + emotional_balance - stress_level) / 3
-                }
+                "metrics": dept_metrics,
+                "trendData": trend_data
             })
         
-        # Generate alerts
-        alerts = []
-        for dept in department_analytics:
-            if dept["metrics"]["stressLevel"] > 60:
-                alerts.append({
-                    "id": f"stress_{dept['department']}",
-                    "type": "stress",
-                    "severity": "high",
-                    "department": dept["department"],
-                    "message": f"High stress levels detected in {dept['department']} department",
-                    "timestamp": datetime.utcnow().isoformat()
-                })
-            elif dept["metrics"]["jobSatisfaction"] < 50:
-                alerts.append({
-                    "id": f"satisfaction_{dept['department']}",
-                    "type": "satisfaction",
-                    "severity": "medium",
-                    "department": dept["department"],
-                    "message": f"Low job satisfaction in {dept['department']} department",
-                    "timestamp": datetime.utcnow().isoformat()
+        # Calculate recent emotional trends (last 7 days in daily intervals)
+        recent_emotional_trends = []
+        for i in range(7):
+            day_start = now - timedelta(days=i)
+            day_end = day_start + timedelta(days=1)
+            day_logs = [log for log in logs if day_start <= log.created_at.replace(tzinfo=pytz.UTC) <= day_end]
+            
+            day_emotions = {}
+            total_emotions = 0
+            
+            for log in day_logs:
+                if log.emotion_data:
+                    try:
+                        # Handle different emotion_data formats
+                        if isinstance(log.emotion_data, dict):
+                            # Already a dictionary, no need to parse
+                            emotion_data = log.emotion_data
+                        elif isinstance(log.emotion_data, str):
+                            try:
+                                # Try to parse as JSON, but handle empty strings and invalid JSON
+                                if not log.emotion_data.strip():
+                                    # Skip empty strings
+                                    continue
+                                    
+                                emotion_data = json.loads(log.emotion_data)
+                            except json.JSONDecodeError:
+                                # Try to handle common cases where the emotion is just a string
+                                if log.emotion_data.strip().lower() in ['happiness', 'sadness', 'anger', 'fear', 'disgust', 'surprise', 'neutral']:
+                                    # Create a simple emotion dict with the string as the key
+                                    emotion_data = {log.emotion_data.strip().lower(): 1.0}
+                                else:
+                                    continue
+                        else:
+                            logger.warning(f"Unexpected emotion_data type in day logs: {type(log.emotion_data)}")
+                            continue
+                        
+                        # Skip if emotion_data is not in the expected format
+                        if not isinstance(emotion_data, dict):
+                            # Try to convert to dict if it's a simple string
+                            if isinstance(emotion_data, str) and emotion_data.strip():
+                                emotion_data = {emotion_data.strip().lower(): 1.0}
+                            else:
+                                continue
+                        
+                        normalized_emotions = normalize_emotion_data(emotion_data)
+                        for emotion, value in normalized_emotions.items():
+                            day_emotions[emotion] = day_emotions.get(emotion, 0) + value
+                            total_emotions += value
+                    except Exception as e:
+                        logger.warning(f"Error processing daily emotion data: {str(e)}")
+                        continue
+            
+            if total_emotions > 0:
+                emotion_distribution = [
+                    {
+                        "emotion": emotion,
+                        "percentage": (value / total_emotions) * 100
+                    }
+                    for emotion, value in day_emotions.items()
+                ]
+                
+                recent_emotional_trends.append({
+                    "timestamp": day_start.isoformat(),
+                    "emotionDistribution": emotion_distribution
                 })
         
-        # Calculate overall wellbeing
-        overall_metrics = {
-            "stressLevel": sum(d["metrics"]["stressLevel"] for d in department_analytics) / len(department_analytics) if department_analytics else 0,
-            "jobSatisfaction": sum(d["metrics"]["jobSatisfaction"] for d in department_analytics) / len(department_analytics) if department_analytics else 0,
-            "emotionalBalance": sum(d["metrics"]["emotionalBalance"] for d in department_analytics) / len(department_analytics) if department_analytics else 0,
-            "wellbeingScore": sum(d["metrics"]["wellbeingScore"] for d in department_analytics) / len(department_analytics) if department_analytics else 0
-        }
+        # Generate alerts based on department analytics
+        alerts = generate_alerts(department_analytics)
         
+        logger.info("Successfully generated HR analytics")
         return {
-            "overallWellbeing": overall_metrics,
+            "overallWellbeing": overall_wellbeing,
             "departmentAnalytics": department_analytics,
-            "recentEmotionalTrends": [
-                {
-                    "timestamp": (datetime.utcnow() - timedelta(days=7)).isoformat(),
-                    "emotionDistribution": emotion_distribution
-                },
-                {
-                    "timestamp": datetime.utcnow().isoformat(),
-                    "emotionDistribution": emotion_distribution
-                }
-            ],
+            "recentEmotionalTrends": recent_emotional_trends,
             "alerts": alerts
         }
         
+    except HTTPException:
+        raise
     except Exception as e:
-        logger.error(f"Failed to get HR analytics: {e}")
+        logger.error(f"Failed to get HR analytics: {str(e)}", exc_info=True)
         raise HTTPException(
             status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
-            detail=str(e)
+            detail="Failed to get HR analytics"
         )
 
 @router.get("/auth")
 async def get_auth_analytics(
-    db: Session = Depends(get_db),
-    current_user: User = Depends(get_current_user)
+    db: Session = Depends(get_db)
 ):
     """Get authentication analytics"""
+    logger.info("Received request to /api/analytics/auth")
     try:
         # Get authentication logs from the past 24 hours
         day_ago = datetime.utcnow() - timedelta(days=1)
+        
         logs = db.query(AuthenticationLog).filter(
             AuthenticationLog.created_at >= day_ago
         ).all()
@@ -139,12 +433,56 @@ async def get_auth_analytics(
         # Calculate metrics
         total_auths = len(logs)
         successful_auths = sum(1 for log in logs if log.success)
-        avg_confidence = sum(log.confidence for log in logs) / total_auths if total_auths > 0 else 0
+        
+        # Calculate average confidence
+        avg_confidence = 0
+        if total_auths > 0:
+            avg_confidence = sum(log.confidence for log in logs) / total_auths
+        
+        # Initialize emotion counts using standard emotion names
+        standard_emotions = {
+            "neutral": 0,
+            "happiness": 0,
+            "sadness": 0,
+            "anger": 0,
+            "surprise": 0,
+            "fear": 0,
+            "disgust": 0
+        }
+        
+        total_emotions = 0
+        for log in logs:
+            if log.emotion_data:
+                try:
+                    # Parse emotion data
+                    emotion_data = json.loads(log.emotion_data) if isinstance(log.emotion_data, str) else log.emotion_data
+                    
+                    # Use the normalize_emotion_data function to handle all cases
+                    normalized_emotions = normalize_emotion_data(emotion_data)
+                    
+                    # Find the dominant emotion
+                    if normalized_emotions:
+                        max_emotion = max(normalized_emotions.items(), key=lambda x: x[1])
+                        emotion_name = max_emotion[0]
+                        if emotion_name in standard_emotions:
+                            standard_emotions[emotion_name] += 1
+                            total_emotions += 1
+                except Exception as e:
+                    logger.error(f"Error parsing emotion data: {e}")
+                    continue
+        
+        # Convert counts to probabilities
+        emotion_distribution = {
+            emotion: count / total_emotions if total_emotions > 0 else 0.0
+            for emotion, count in standard_emotions.items()
+        }
+        
+        logger.info(f"Analytics results - Total auths: {total_auths}, Emotions: {standard_emotions}")
         
         return {
             "dailyAuthentications": total_auths,
-            "successRate": (successful_auths / total_auths * 100) if total_auths > 0 else 0,
-            "averageConfidence": avg_confidence
+            "averageConfidence": avg_confidence,
+            "emotionDistribution": emotion_distribution
         }
         
     except Exception as e:

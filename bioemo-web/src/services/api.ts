@@ -1,12 +1,12 @@
-import type { EmotionPrediction, User, Analytics as AnalyticsType, UserInfo, AuthenticationResponse } from '../types';
+import type { EmotionPrediction, User, Analytics, UserInfo, AuthenticationResponse, AuthenticationAttempt } from '../types';
 import type { UploadFile } from 'antd/es/upload/interface';
 import { calculateAllMetrics } from './wellbeingCalculator';
 import { getEnvConfig } from '../config/env';
+import { getAuthToken, setAuthToken, removeAuthToken } from './auth';
 
 const { authServerUrl, emotionServerUrl, useMockApi } = getEnvConfig();
 const API_PREFIX = '/api';  // API prefix for all endpoints
 
-const EMO_API_URL = 'http://localhost:1236'; // Update this if the emo-api runs on a different port
 
 // Helper function to create a complete emotion prediction
 const createEmotionPrediction = (values: Partial<EmotionPrediction>): EmotionPrediction => ({
@@ -26,7 +26,13 @@ export interface Authentication {
   success: boolean;
   confidence: number;
   dominantEmotion: string;
-  user?: User;
+  user?: {
+    id: string;
+    name: string;
+    email?: string;
+    role?: string;
+    department?: string;
+  };
 }
 
 export interface LocalStats {
@@ -124,7 +130,13 @@ const mockStats: LocalStats = {
       success: true,
       confidence: 0.95,
       dominantEmotion: 'happiness',
-      user: mockUser,
+      user: {
+        id: mockUser.id,
+        name: mockUser.name,
+        email: mockUser.email,
+        role: mockUser.role,
+        department: mockUser.department
+      }
     },
     {
       id: '2',
@@ -132,19 +144,25 @@ const mockStats: LocalStats = {
       success: true,
       confidence: 0.88,
       dominantEmotion: 'neutral',
-      user: mockUser,
+      user: {
+        id: mockUser.id,
+        name: mockUser.name,
+        email: mockUser.email,
+        role: mockUser.role,
+        department: mockUser.department
+      }
     },
     {
       id: '3',
       timestamp: new Date(Date.now() - 7200000).toISOString(),
       success: false,
       confidence: 0.45,
-      dominantEmotion: 'surprise',
+      dominantEmotion: 'surprise'
     },
   ],
 };
 
-const mockAnalytics: AnalyticsType = {
+const mockAnalytics: Analytics = {
   dailyAuthentications: 150,
   averageConfidence: 0.85,
   emotionDistribution: createEmotionPrediction({
@@ -155,7 +173,7 @@ const mockAnalytics: AnalyticsType = {
     anger: 0.05,
     disgust: 0.03,
     fear: 0.02,
-  }),
+  })
 };
 
 const mockEmotions = createEmotionPrediction({
@@ -324,12 +342,30 @@ const mockCredentials = {
 // Mock authentication scenarios based on random confidence scores
 const generateMockAuthResult = (): AuthenticationResponse => {
   const timestamp = new Date().toISOString();
+  const userId = "0000342";
+  
+  // Create a mock JWT token
+  const mockToken = `eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.${btoa(JSON.stringify({
+    sub: userId,
+    name: "Alex Thompson",
+    email: "alex.thompson@company.com",
+    department: "Human Resources",
+    role: "HR Manager",
+    exp: Math.floor(Date.now() / 1000) + 86400 // 24 hours
+  }))}.MOCK_SIGNATURE`;
+  
   return {
     success: true,
     confidence: 0.95,
     message: 'High confidence match - Access granted',
-    user_id: "0000342",
+    user_id: userId,
     authenticated_at: timestamp,
+    threshold: 0.7,
+    token: mockToken,
+    department: "Human Resources",
+    role: "HR Manager",
+    name: "Alex Thompson",
+    email: "alex.thompson@company.com",
     emotions: {
       happiness: 0.0,
       neutral: 1.0,
@@ -338,22 +374,45 @@ const generateMockAuthResult = (): AuthenticationResponse => {
       anger: 0.0,
       disgust: 0.0,
       fear: 0.0
-    },
-    user: {
-      id: "0000342",
-      name: "Amy Smith",
-      email: "amy.smith@company.com",
-      department: "Marketing",
-      role: "Manager",
-      joinDate: "2024-03-10T12:06:02",
-      lastAuthenticated: timestamp
     }
   };
+};
+
+// Helper function to get headers with auth token
+const getHeaders = (contentType?: string) => {
+  const headers: Record<string, string> = {};
+  const token = getAuthToken();
+  
+  if (token) {
+    // Check if it's a JWT token (contains dots) or mock token
+    if (token.includes('.')) {
+      // It's a JWT token
+      headers['Authorization'] = `Bearer ${token}`;
+    } else if (token.startsWith('mock-token-')) {
+      // It's a mock token, extract the user ID
+      const userId = token.replace('mock-token-', '');
+      headers['X-User-ID'] = userId;
+    }
+  }
+  
+  if (contentType) {
+    headers['Content-Type'] = contentType;
+  }
+  
+  return headers;
 };
 
 // Helper function to handle API responses
 const handleResponse = async (response: Response) => {
   if (!response.ok) {
+    if (response.status === 401) {
+      // Remove invalid token
+      removeAuthToken();
+      throw new Error('Authentication required. Please log in again.');
+    }
+    if (response.status === 403) {
+      throw new Error('You do not have permission to access this resource.');
+    }
     const error = await response.json().catch(() => ({ message: 'An error occurred' }));
     throw new Error(error.message || 'API request failed');
   }
@@ -419,7 +478,7 @@ export const authenticateUser = async (imageData: string | Blob | File): Promise
         console.log('Created Blob:', blob.size, 'bytes,', blob.type);
         
         formData.append('image', blob, 'image.jpg');
-        console.log('Added Blob to FormData');
+        console.log('Added Blob to FormData with field name "image"');
       } catch (e) {
         console.error('Error processing base64 image:', e);
         throw new Error('Invalid image data format');
@@ -427,13 +486,13 @@ export const authenticateUser = async (imageData: string | Blob | File): Promise
     } else {
       // If it's already a Blob or File, use it directly
       formData.append('image', imageData, 'image.jpg');
-      console.log('Added Blob/File directly to FormData');
+      console.log('Added Blob/File directly to FormData with field name "image"');
     }
     
-    console.log('Sending request to:', `${authServerUrl}/authenticate`);
-    const response = await fetch(`${authServerUrl}/authenticate`, {
+    const response = await fetch(`${authServerUrl}${API_PREFIX}/auth/authenticate`, {
       method: 'POST',
       body: formData,
+      headers: getHeaders()
     });
     
     console.log('Response status:', response.status);
@@ -445,6 +504,12 @@ export const authenticateUser = async (imageData: string | Blob | File): Promise
     
     const result = await response.json();
     console.log('Authentication response:', result);
+    
+    // Store the token if it's in the response
+    if (result.token) {
+      setAuthToken(result.token);
+    }
+    
     return result;
   } catch (error) {
     console.error('Authentication error:', error);
@@ -453,13 +518,15 @@ export const authenticateUser = async (imageData: string | Blob | File): Promise
 };
 
 // Get analytics stats
-export const getAnalyticsStats = async (): Promise<LocalStats> => {
-  if (useMockApi) {
-    return simulateApiCall(mockStats);
-  }
-
+export const getAnalyticsStats = async (): Promise<Analytics> => {
   try {
-    const response = await fetch(`${authServerUrl}${API_PREFIX}/analytics/stats`);
+    if (useMockApi) {
+      return simulateApiCall(mockAnalytics);
+    }
+
+    const response = await fetch(`${authServerUrl}${API_PREFIX}/analytics/auth`, {
+      headers: getHeaders(),
+    });
     return handleResponse(response);
   } catch (error) {
     console.error('Failed to fetch analytics stats:', error);
@@ -468,13 +535,19 @@ export const getAnalyticsStats = async (): Promise<LocalStats> => {
 };
 
 // Get authentication analytics
-export const getAuthAnalytics = async (): Promise<AnalyticsType> => {
+export const getAuthAnalytics = async (timeRange?: string): Promise<Analytics> => {
   if (useMockApi) {
     return simulateApiCall(mockAnalytics);
   }
 
   try {
-    const response = await fetch(`${authServerUrl}${API_PREFIX}/analytics/auth`);
+    const url = timeRange 
+      ? `${authServerUrl}${API_PREFIX}/analytics/auth?timeRange=${timeRange}` 
+      : `${authServerUrl}${API_PREFIX}/analytics/auth`;
+      
+    const response = await fetch(url, {
+      headers: getHeaders()
+    });
     return handleResponse(response);
   } catch (error) {
     console.error('Failed to fetch auth analytics:', error);
@@ -483,17 +556,25 @@ export const getAuthAnalytics = async (): Promise<AnalyticsType> => {
 };
 
 // Get HR analytics
-export const getHRAnalytics = async (): Promise<HRAnalytics> => {
+export const getHRAnalytics = async (timeRange?: string): Promise<HRAnalytics> => {
   if (useMockApi) {
-    return simulateApiCall(mockHRAnalytics);
+    await delay(500);
+    return mockHRAnalytics;
   }
 
   try {
-    const response = await fetch(`${authServerUrl}${API_PREFIX}/analytics/hr`);
-    return handleResponse(response);
+    const url = timeRange 
+      ? `${authServerUrl}${API_PREFIX}/analytics/hr?timeRange=${timeRange}` 
+      : `${authServerUrl}${API_PREFIX}/analytics/hr`;
+    
+    const response = await fetch(url, {
+      headers: getHeaders(),
+    });
+    
+    return await handleResponse(response);
   } catch (error) {
     console.error('Failed to fetch HR analytics:', error);
-    throw error;
+    return mockHRAnalytics;
   }
 };
 
@@ -515,7 +596,9 @@ export const getVerificationRequests = async (): Promise<VerificationRequestDeta
     ]);
   }
 
-  const response = await fetch(`${authServerUrl}/verification-requests`);
+  const response = await fetch(`${authServerUrl}${API_PREFIX}/verification/requests`, {
+    headers: getHeaders()
+  });
   return handleResponse(response);
 };
 
@@ -526,7 +609,9 @@ export const getUserProfile = async (userId: string): Promise<User> => {
   }
 
   try {
-    const response = await fetch(`${authServerUrl}${API_PREFIX}/users/${userId}`);
+    const response = await fetch(`${authServerUrl}${API_PREFIX}/users/${userId}`, {
+      headers: getHeaders()
+    });
     return handleResponse(response);
   } catch (error) {
     console.error('Failed to fetch user profile:', error);
@@ -542,7 +627,11 @@ export const verifyCredentials = async (username: string, password: string): Pro
     if (username === 'admin' && password === 'admin') {
       return {
         success: true,
-        user: mockUser
+        user: {
+          ...mockUser,
+          department: "Human Resources",
+          role: "HR Manager"
+        }
       };
     }
     return { success: false };
@@ -551,10 +640,17 @@ export const verifyCredentials = async (username: string, password: string): Pro
   try {
     const response = await fetch(`${authServerUrl}${API_PREFIX}/auth/verify`, {
       method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
+      headers: getHeaders('application/json'),
       body: JSON.stringify({ username, password })
     });
-    return handleResponse(response);
+    const result = await handleResponse(response);
+    
+    // Store the token if it's in the response
+    if (result.token) {
+      setAuthToken(result.token);
+    }
+    
+    return result;
   } catch (error) {
     console.error('Failed to verify credentials:', error);
     throw error;
@@ -584,10 +680,11 @@ export const updateVerificationRequestStatus = async (
     });
   }
 
-  const response = await fetch(`${authServerUrl}/verification-requests/${requestId}`, {
+  const response = await fetch(`${authServerUrl}${API_PREFIX}/verification/requests/${requestId}`, {
     method: 'PUT',
     headers: {
       'Content-Type': 'application/json',
+      ...getHeaders()
     },
     body: JSON.stringify({ status })
   });
@@ -601,15 +698,22 @@ export async function getUserInfo(userId: string): Promise<UserInfo> {
       user_id: userId,
       name: "Alex Thompson",
       email: "alex.thompson@company.com",
-      department: "Research & Development",
-      role: "Senior Research Engineer",
+      department: "Human Resources",
+      role: "HR Manager",
       enrolled_at: new Date().toISOString(),
       last_authenticated: new Date().toISOString(),
-      last_login: new Date().toISOString(),
       latest_auth: {
+        id: "auth123",
+        user_id: userId,
         timestamp: new Date().toISOString(),
         confidence: 0.732,
-        device_info: "Chrome on Windows"
+        success: true,
+        device_info: "Chrome on Windows",
+        emotion_data: createEmotionPrediction({
+          happiness: 0.2,
+          neutral: 0.7,
+          surprise: 0.1
+        })
       },
       authentication_stats: {
         total_attempts: 10,
@@ -619,19 +723,33 @@ export async function getUserInfo(userId: string): Promise<UserInfo> {
       },
       recent_attempts: [
         {
+          id: "auth123",
+          user_id: userId,
           timestamp: new Date().toISOString(),
           success: true,
           confidence: 0.697,
-          device_info: "Chrome on Windows"
+          device_info: "Chrome on Windows",
+          emotion_data: createEmotionPrediction({
+            happiness: 0.2,
+            neutral: 0.7,
+            surprise: 0.1
+          })
         },
         {
+          id: "auth124",
+          user_id: userId,
           timestamp: new Date(Date.now() - 3600000).toISOString(),
           success: true,
           confidence: 0.736,
-          device_info: "Chrome on Windows"
+          device_info: "Chrome on Windows",
+          emotion_data: createEmotionPrediction({
+            happiness: 0.3,
+            neutral: 0.6,
+            surprise: 0.1
+          })
         }
       ],
-      emotional_state: {
+      emotional_state: createEmotionPrediction({
         happiness: 0.0,
         neutral: 1.0,
         surprise: 0.0,
@@ -639,20 +757,284 @@ export async function getUserInfo(userId: string): Promise<UserInfo> {
         anger: 0.0,
         disgust: 0.0,
         fear: 0.0
-      },
-      last_updated: new Date().toISOString()
+      }),
+      emotion_trends: {
+        average: createEmotionPrediction({
+          happiness: 0.2,
+          neutral: 0.7,
+          surprise: 0.1
+        }),
+        dominant: "neutral"
+      }
     });
   }
 
   try {
     console.log('Fetching user info for:', userId);
-    const response = await fetch(`${authServerUrl}/api/users/${userId}`);
+    const response = await fetch(`${authServerUrl}/api/users/${userId}`, {
+      headers: getHeaders()
+    });
     return handleResponse(response);
   } catch (error) {
     console.error('Failed to fetch user info:', error);
     throw error;
   }
 }
+
+// Submit verification request
+export const submitVerificationRequest = async (request: {
+  employeeId: string;
+  reason: string;
+  additionalNotes?: string;
+  capturedImage: string;
+  confidence: number;
+}): Promise<{ success: boolean; message: string }> => {
+  if (useMockApi) {
+    await delay(1000);
+    console.log('Mock verification request submitted:', request);
+    return {
+      success: true,
+      message: 'Verification request submitted successfully'
+    };
+  }
+
+  try {
+    const response = await fetch(`${authServerUrl}${API_PREFIX}/verification-requests`, {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+        ...getHeaders()
+      },
+      body: JSON.stringify(request)
+    });
+    return handleResponse(response);
+  } catch (error) {
+    console.error('Failed to submit verification request:', error);
+    throw error;
+  }
+};
+
+export const predictEmotions = async (imageData: string): Promise<EmotionPrediction> => {
+  if (useMockApi) {
+    await delay(500);
+    return mockEmotions;
+  }
+
+  try {
+    // Convert base64 image data to a Blob for FormData
+    let imageBlob: Blob;
+    if (typeof imageData === 'string' && imageData.startsWith('data:')) {
+      const parts = imageData.split(',');
+      const base64Data = parts[1] || imageData;
+      const mimeMatch = parts[0]?.match(/:(.*?);/);
+      const mimeString = mimeMatch ? mimeMatch[1] : 'image/jpeg';
+      
+      const byteString = atob(base64Data);
+      const ab = new ArrayBuffer(byteString.length);
+      const ia = new Uint8Array(ab);
+      for (let i = 0; i < byteString.length; i++) {
+        ia[i] = byteString.charCodeAt(i);
+      }
+      imageBlob = new Blob([ab], { type: mimeString });
+    } else {
+      // If it's not a base64 string, try to use it as is
+      imageBlob = new Blob([imageData], { type: 'image/jpeg' });
+    }
+
+    // Create FormData
+    const formData = new FormData();
+    formData.append('file', imageBlob, 'image.jpg');
+
+    // First try the emotion API directly
+    try {
+      console.log('Sending request to emotion API...');
+      const response = await fetch(`${emotionServerUrl}/predict`, {
+        method: 'POST',
+        body: formData
+      });
+
+      if (response.ok) {
+        const data = await response.json();
+        console.log('Emotion API response:', data);
+        
+        // Return the emotion data directly as it should already be in the correct format
+        return data;
+      } else {
+        console.warn(`Emotion API returned status ${response.status}`);
+        const errorText = await response.text();
+        console.warn('Error response:', errorText);
+      }
+    } catch (e) {
+      console.warn('Emotion API failed, falling back to auth server:', e);
+    }
+    
+    // Fallback to the auth server
+    console.log('Trying auth server emotion endpoint...');
+    const response = await fetch(`${authServerUrl}${API_PREFIX}/emotions/predict`, {
+      method: 'POST',
+      headers: getHeaders(),
+      body: formData
+    });
+
+    if (response.ok) {
+      const data = await response.json();
+      return data.emotions || createEmotionPrediction({});
+    }
+
+    throw new Error('Failed to predict emotions');
+  } catch (error) {
+    console.error('Failed to predict emotions:', error);
+    return mockEmotions;
+  }
+};
+
+export interface OTPRequestData {
+  user_id: string;
+  reason: string;
+  additional_notes?: string;
+  capturedImage: string;
+  confidence: number;
+}
+
+export interface OTPVerifyData {
+  user_id: string;
+  otp: string;
+}
+
+export interface CredentialsVerifyData {
+  user_id: string;
+  password: string;
+}
+
+export const requestVerificationOTP = async (data: OTPRequestData): Promise<{ success: boolean; message: string; otp?: string }> => {
+  if (useMockApi) {
+    await delay(1000);
+    const otp = Math.floor(100000 + Math.random() * 900000).toString();
+    console.log('Mock OTP generated:', otp);
+    return {
+      success: true,
+      message: 'OTP sent successfully',
+      otp: otp // Only for testing
+    };
+  }
+
+  try {
+    // Make sure confidence is a number to avoid serialization issues
+    const payload = {
+      ...data,
+      confidence: typeof data.confidence === 'number' ? data.confidence : parseFloat(data.confidence as any) || 0
+    };
+
+    const response = await fetch(`${authServerUrl}${API_PREFIX}/verification/request-otp`, {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+        ...getHeaders()
+      },
+      body: JSON.stringify(payload)
+    });
+    return handleResponse(response);
+  } catch (error) {
+    console.error('Failed to request OTP:', error);
+    throw error;
+  }
+};
+
+export const verifyVerificationOTP = async (data: OTPVerifyData): Promise<{ success: boolean; message: string; user_id: string; user?: any }> => {
+  if (useMockApi) {
+    await delay(1000);
+    console.log('Mock OTP verified:', data.otp);
+    return {
+      success: true,
+      message: 'OTP verified successfully',
+      user_id: data.user_id,
+      user: mockUser
+    };
+  }
+
+  try {
+    const response = await fetch(`${authServerUrl}${API_PREFIX}/verification/verify-otp`, {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+        ...getHeaders()
+      },
+      body: JSON.stringify(data)
+    });
+    return handleResponse(response);
+  } catch (error) {
+    console.error('Failed to verify OTP:', error);
+    throw error;
+  }
+};
+
+export const verifyUserCredentials = async (data: CredentialsVerifyData): Promise<{ success: boolean; message: string; otp?: string }> => {
+  if (useMockApi) {
+    await delay(1000);
+    if (data.password === 'demo') {
+      const otp = Math.floor(100000 + Math.random() * 900000).toString();
+      console.log('Mock OTP generated after credential verification:', otp);
+      return {
+        success: true,
+        message: 'Credentials verified, OTP sent',
+        otp: otp // Only for testing
+      };
+    }
+    return {
+      success: false,
+      message: 'Invalid credentials'
+    };
+  }
+
+  try {
+    const response = await fetch(`${authServerUrl}${API_PREFIX}/verification/verify-credentials`, {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+        ...getHeaders()
+      },
+      body: JSON.stringify(data)
+    });
+    return handleResponse(response);
+  } catch (error) {
+    console.error('Failed to verify credentials:', error);
+    throw error;
+  }
+};
+
+export const registerUser = async (formData: FormData): Promise<{ success: boolean; message: string; user_id?: string }> => {
+  if (useMockApi) {
+    await delay(2000); // Simulate network latency
+    return {
+      success: true,
+      message: 'User registered successfully with default password: demo. Model training started in the background.',
+      user_id: 'mock-user-id'
+    };
+  }
+
+  try {
+    const response = await fetch(`${authServerUrl}${API_PREFIX}/users/register`, {
+      method: 'POST',
+      headers: {
+        'Authorization': `Bearer ${getAuthToken()}`
+      },
+      body: formData,
+    });
+
+    const data = await response.json();
+    return {
+      success: response.ok,
+      message: data.message || (response.ok ? 'User registered successfully with default password: demo' : 'Failed to register user'),
+      user_id: data.user_id
+    };
+  } catch (error) {
+    console.error('Error registering user:', error);
+    return {
+      success: false,
+      message: 'Network error while registering user'
+    };
+  }
+};
 
 // Export all API functions as a single object
 export const api = {
@@ -665,62 +1047,10 @@ export const api = {
   verifyCredentials,
   updateVerificationRequestStatus,
   getUserInfo,
-  // Add other API functions here as needed
+  submitVerificationRequest,
+  requestVerificationOTP,
+  verifyVerificationOTP,
+  verifyUserCredentials,
+  predictEmotions,
+  registerUser
 };
-
-export async function predictEmotions(imageData: string): Promise<EmotionPrediction> {
-  try {
-    // Convert base64 to blob
-    const base64Response = await fetch(`data:image/jpeg;base64,${imageData}`);
-    const blob = await base64Response.blob();
-    
-    // Create form data
-    const formData = new FormData();
-    formData.append('file', blob, 'image.jpg');
-    
-    const response = await fetch(`${EMO_API_URL}/predict`, {
-      method: 'POST',
-      body: formData,
-    });
-    
-    if (!response.ok) {
-      throw new Error('Failed to predict emotions');
-    }
-    
-    const data = await response.json();
-    
-    // The API now returns the emotions directly in the correct format
-    const emotions: EmotionPrediction = {
-      happiness: data.happiness || 0,
-      neutral: data.neutral || 0,
-      surprise: data.surprise || 0,
-      sadness: data.sadness || 0,
-      anger: data.anger || 0,
-      disgust: data.disgust || 0,
-      fear: data.fear || 0
-    };
-
-    // Normalize the probabilities to ensure they sum to 1
-    const total = Object.values(emotions).reduce((sum, val) => sum + val, 0);
-    if (total > 0) {
-      Object.keys(emotions).forEach(key => {
-        emotions[key] = emotions[key] / total;
-      });
-    }
-
-    console.log('Predicted emotions:', emotions);
-    return emotions;
-  } catch (error) {
-    console.error('Error predicting emotions:', error);
-    // Return neutral state on error
-    return {
-      happiness: 0,
-      neutral: 1,
-      surprise: 0,
-      sadness: 0,
-      anger: 0,
-      disgust: 0,
-      fear: 0
-    };
-  }
-}

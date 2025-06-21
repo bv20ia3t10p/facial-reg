@@ -106,11 +106,50 @@ export interface AuthenticationResponse {
   capturedImage?: string;
 }
 
+export interface EmotionProbabilities {
+  neutral: number;
+  happy: number;
+  sad: number;
+  angry: number;
+  surprised: number;
+  fearful: number;
+  disgusted: number;
+  [key: string]: number; // Allow for other emotion keys
+}
+
+export interface EmotionData {
+  // Original format fields
+  emotion?: string;
+  confidence?: number;
+  probabilities?: EmotionProbabilities;
+  timestamp?: string;
+  
+  // RAF-DB format fields (direct properties)
+  neutral?: number;
+  happiness?: number;
+  sadness?: number;
+  anger?: number;
+  surprise?: number;
+  fear?: number;
+  disgust?: number;
+  
+  // Allow for additional properties
+  [key: string]: any;
+}
+
+export interface NormalizedEmotionData {
+  emotion: string;
+  confidence: number;
+  probabilities: EmotionProbabilities;
+  timestamp: string;
+  normalized: EmotionPrediction;
+}
+
 export interface AuthenticationAttempt {
   timestamp: string;
   success: boolean;
   confidence: number;
-  emotion_data: EmotionPrediction;
+  emotion_data: EmotionData | string; // Can be object or JSON string
 }
 
 export interface AuthenticationStats {

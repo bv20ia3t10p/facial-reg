@@ -26,6 +26,9 @@ class PrivacyEngine:
         self.delta = float(os.getenv('DP_DELTA', '1e-5'))
         self.max_grad_norm = float(os.getenv('DP_MAX_GRAD_NORM', '5.0'))
         self.noise_multiplier = float(os.getenv('DP_NOISE_MULTIPLIER', '0.2'))
+        self.enable_dp = os.getenv('ENABLE_DP', 'true').lower() == 'true'
+        self.max_epsilon = self.epsilon
+        self.current_epsilon = 0.0
         
         logger.info(f"Privacy parameters: epsilon={self.epsilon}, delta={self.delta}, "
                    f"max_grad_norm={self.max_grad_norm}, noise_multiplier={self.noise_multiplier}")
@@ -197,4 +200,26 @@ class PrivacyEngine:
             }
         except Exception as e:
             logger.error(f"Privacy budget status check failed: {e}")
-            return {"error": str(e)} 
+            return {"error": str(e)}
+    
+    def get_privacy_params(self) -> dict:
+        """Get the current privacy parameters"""
+        return {
+            'epsilon': self.epsilon,
+            'delta': self.delta,
+            'max_grad_norm': self.max_grad_norm,
+            'noise_multiplier': self.noise_multiplier
+        }
+        
+    async def get_remaining_budget(self) -> float:
+        """Get the remaining privacy budget"""
+        # If privacy is not enabled, return a high value
+        if not self.enable_dp:
+            return float('inf')
+            
+        # If we're tracking epsilon, return the difference between max and current
+        if hasattr(self, 'current_epsilon') and self.max_epsilon:
+            return max(0.0, self.max_epsilon - self.current_epsilon)
+            
+        # Default to returning max epsilon if we're not tracking usage
+        return self.max_epsilon or 100.0 

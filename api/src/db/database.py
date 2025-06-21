@@ -16,7 +16,7 @@ from fastapi import HTTPException, status, Depends
 from pathlib import Path
 import json
 
-from ..utils.security import generate_uuid
+from ..utils.common import generate_uuid, generate_auth_log_id
 
 logger = logging.getLogger(__name__)
 
@@ -133,17 +133,19 @@ class User(Base):
     verification_requests = relationship("VerificationRequest", back_populates="user")
 
 class AuthenticationLog(Base):
-    """Model for storing authentication attempts"""
+    """Model for authentication logs"""
     __tablename__ = "authentication_logs"
     
-    id = Column(String, primary_key=True, default=generate_uuid)
-    user_id = Column(String, index=True)  # No foreign key constraint since users are in folders
-    success = Column(Boolean, nullable=False)
+    id = Column(String, primary_key=True)
+    user_id = Column(String, nullable=False)
     confidence = Column(Float, nullable=False)
-    emotion_data = Column(JSON)  # Store full emotion analysis results
+    success = Column(Boolean, nullable=False)
+    threshold = Column(Float, nullable=True)  # Add threshold field
+    emotion_data = Column(JSON)
     created_at = Column(DateTime, default=datetime.utcnow)
-    device_info = Column(String)  # Store device info
-    captured_image = Column(LargeBinary, nullable=True)  # Optional captured image storage
+    device_info = Column(String)
+    captured_image = Column(String)  # Path to stored image
+    authenticated_at = Column(DateTime, nullable=True)  # Add authenticated_at field
 
 class VerificationRequest(Base):
     """Model for verification requests"""
@@ -153,7 +155,7 @@ class VerificationRequest(Base):
     user_id = Column(String, ForeignKey("users.id"))
     reason = Column(String, nullable=False)
     additional_notes = Column(String)
-    captured_image = Column(LargeBinary)  # Encrypted captured image
+    captured_image = Column(String)  # Base64 encoded image
     confidence = Column(Float)
     status = Column(String, default="pending")  # pending, approved, rejected
     created_at = Column(DateTime, default=datetime.utcnow)
@@ -213,13 +215,11 @@ def get_db():
                 logger.error(f"[Session {session_id}] Error closing database session: {e}")
 
 def init_db():
-    """Initialize database tables if they don't exist"""
+    """Initialize database and create tables"""
     try:
-        logger.info("=== Initializing database ===")
-        # Create tables
+        logger.info("Creating database tables...")
         Base.metadata.create_all(bind=engine)
         logger.info("Database tables created successfully")
-        
     except Exception as e:
         logger.error(f"Failed to initialize database: {e}")
         raise
@@ -243,33 +243,28 @@ def create_user(db, user_data: dict) -> Optional[User]:
 def log_authentication(db, log_data: dict) -> Optional[AuthenticationLog]:
     """Log an authentication attempt"""
     try:
+        # Generate unique ID for the log entry if not provided
+        if 'id' not in log_data:
+            log_data['id'] = generate_auth_log_id()
+            
         # Validate required fields
-        required_fields = ['id', 'user_id', 'success', 'confidence', 'created_at']
+        required_fields = ['user_id', 'success', 'confidence', 'created_at']
         missing_fields = [field for field in required_fields if field not in log_data]
         if missing_fields:
             logger.error(f"Missing required fields for authentication log: {missing_fields}")
             return None
 
-        # Ensure created_at is a datetime object
-        if isinstance(log_data['created_at'], str):
-            try:
-                log_data['created_at'] = datetime.fromisoformat(log_data['created_at'].replace('Z', '+00:00'))
-            except ValueError as e:
-                logger.error(f"Invalid datetime format in created_at: {e}")
-                return None
-
-        # Log sanitized data
+        # Sanitize data for logging
         sanitized_data = sanitize_log_data(log_data)
-        logger.info(f"Creating authentication log for user {log_data['user_id']}")
-        logger.debug(f"Authentication log data: {json_safe_dumps(sanitized_data)}")
+        logger.info(f"Creating authentication log: {json_safe_dumps(sanitized_data)}")
 
-        # Create log entry using SQLAlchemy ORM
+        # Create and save the log entry
         log_entry = AuthenticationLog(**log_data)
         db.add(log_entry)
         db.commit()
         db.refresh(log_entry)
         
-        logger.info(f"Successfully created authentication log with ID: {log_entry.id}")
+        logger.info(f"Successfully created authentication log: {log_entry.id}")
         return log_entry
         
     except Exception as e:
@@ -280,12 +275,37 @@ def log_authentication(db, log_data: dict) -> Optional[AuthenticationLog]:
 def create_verification_request(db, request_data: dict) -> Optional[VerificationRequest]:
     """Create a new verification request"""
     try:
+        # Create a sanitized copy of the data for logging (without the image)
+        log_data = request_data.copy()
+        if 'captured_image' in log_data:
+            log_data['captured_image'] = '[BASE64_IMAGE_DATA]'
+        
+        logger.info(f"Creating verification request: {json_safe_dumps(log_data)}")
+        
         request = VerificationRequest(**request_data)
         db.add(request)
         db.commit()
         db.refresh(request)
+        
+        logger.info(f"Successfully created verification request: {request.id}")
         return request
     except Exception as e:
         db.rollback()
         logger.error(f"Failed to create verification request: {e}")
+        return None
+
+def create_client(db, client_data: dict) -> Optional[Client]:
+    """Create a new client"""
+    try:
+        sanitized_data = sanitize_log_data(client_data)
+        logger.info(f"Creating new client with data: {json_safe_dumps(sanitized_data)}")
+        client = Client(**client_data)
+        db.add(client)
+        db.commit()
+        db.refresh(client)
+        logger.info(f"Successfully created client: {client.id}")
+        return client
+    except Exception as e:
+        logger.error(f"Failed to create client: {e}")
+        db.rollback()
         return None 

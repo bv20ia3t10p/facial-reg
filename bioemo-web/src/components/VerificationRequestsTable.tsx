@@ -1,7 +1,7 @@
-import { Table, Button, Space, Modal, Typography, Tag, Image, theme } from 'antd';
-import { CheckOutlined, CloseOutlined, EyeOutlined } from '@ant-design/icons';
+import { Table, Button, Space, Modal, Typography, Tag, Image, theme, Input, Form, message, Alert } from 'antd';
+import { CheckOutlined, CloseOutlined, EyeOutlined, KeyOutlined, CopyOutlined } from '@ant-design/icons';
 import { useState } from 'react';
-import { api } from '../services/api';
+import { updateVerificationRequestStatus } from '../services/api';
 import type { VerificationRequest } from '../types';
 
 const { Text, Title } = Typography;
@@ -21,27 +21,81 @@ interface VerificationRequestsTableProps {
   onRequestProcessed: () => Promise<unknown>;
 }
 
+function OTPModal({ visible, onClose, otp }: { visible: boolean; onClose: () => void; otp: string }) {
+  return (
+    <Modal
+      title="OTP Generated"
+      open={visible}
+      onCancel={onClose}
+      footer={[
+        <Button key="close" type="primary" onClick={onClose}>
+          Close
+        </Button>
+      ]}
+    >
+      <Space direction="vertical" size="large" style={{ width: '100%' }}>
+        <Alert
+          message="Verification Approved"
+          description="Please provide this OTP to the user for authentication."
+          type="success"
+          showIcon
+        />
+        
+        <div style={{ textAlign: 'center', padding: '20px 0' }}>
+          <Title level={2}>{otp}</Title>
+          <Text type="secondary">This OTP will be valid for 10 minutes</Text>
+        </div>
+        
+        <Form.Item label="OTP">
+          <Input.Group compact>
+            <Input
+              style={{ width: 'calc(100% - 40px)' }}
+              value={otp}
+              readOnly
+            />
+            <Button
+              icon={<CopyOutlined />}
+              onClick={() => {
+                navigator.clipboard.writeText(otp);
+                message.success('OTP copied to clipboard');
+              }}
+            />
+          </Input.Group>
+        </Form.Item>
+      </Space>
+    </Modal>
+  );
+}
+
 function RequestDetailsModal({ request, visible, onClose, onApprove, onReject }: RequestDetailsModalProps) {
   const [loading, setLoading] = useState(false);
+  const [showOtp, setShowOtp] = useState(false);
+  const [otp, setOtp] = useState("");
 
   const handleAction = async (action: 'approve' | 'reject') => {
     setLoading(true);
     try {
       if (action === 'approve') {
+        // Generate OTP
+        const generatedOtp = Math.floor(100000 + Math.random() * 900000).toString();
+        setOtp(generatedOtp);
+        
         await onApprove();
+        setShowOtp(true);
       } else {
         await onReject();
+        onClose();
       }
-      onClose();
     } finally {
       setLoading(false);
     }
   };
 
   return (
+    <>
     <Modal
       title="Verification Request Details"
-      open={visible}
+        open={visible && !showOtp}
       onCancel={onClose}
       footer={[
         <Button key="cancel" onClick={onClose}>
@@ -63,7 +117,7 @@ function RequestDetailsModal({ request, visible, onClose, onApprove, onReject }:
           onClick={() => handleAction('approve')}
           loading={loading}
         >
-          Approve
+            Approve & Generate OTP
         </Button>,
       ]}
       width={800}
@@ -94,35 +148,62 @@ function RequestDetailsModal({ request, visible, onClose, onApprove, onReject }:
         <div>
           <Title level={5}>Captured Image</Title>
           <Image
-            src={request.capturedImage}
+            src={request.capturedImage && !request.capturedImage.startsWith('data:') 
+              ? `data:image/jpeg;base64,${request.capturedImage}` 
+              : request.capturedImage}
             alt="Captured face"
             style={{ maxWidth: '400px', borderRadius: '8px' }}
           />
         </div>
-
-        <div>
-          <Title level={5}>Submitted At</Title>
-          <Text>{new Date(request.submittedAt).toLocaleString()}</Text>
-        </div>
       </Space>
     </Modal>
+
+    <OTPModal 
+      visible={showOtp} 
+      onClose={() => {
+        setShowOtp(false);
+        onClose();
+      }} 
+      otp={otp}
+    />
+    </>
   );
 }
 
 export function VerificationRequestsTable({ requests, loading, onRequestProcessed }: VerificationRequestsTableProps) {
   const [selectedRequest, setSelectedRequest] = useState<VerificationRequest | null>(null);
+  const [modalVisible, setModalVisible] = useState(false);
   const { token } = useToken();
 
-  const handleApprove = async () => {
-    if (!selectedRequest) return;
-    await api.updateVerificationRequestStatus(selectedRequest.id, 'approved');
-    await onRequestProcessed();
+  const handleViewRequest = (record: VerificationRequest) => {
+    setSelectedRequest(record);
+    setModalVisible(true);
   };
 
-  const handleReject = async () => {
+  const handleApproveRequest = async () => {
     if (!selectedRequest) return;
-    await api.updateVerificationRequestStatus(selectedRequest.id, 'rejected');
-    await onRequestProcessed();
+
+    try {
+      // Call API to approve the request
+      await updateVerificationRequestStatus(selectedRequest.id, 'approved');
+      await onRequestProcessed();
+    } catch (error) {
+      console.error("Error approving request:", error);
+      message.error("Failed to approve verification request");
+    }
+  };
+
+  const handleRejectRequest = async () => {
+    if (!selectedRequest) return;
+
+    try {
+      // Call API to reject the request
+      await updateVerificationRequestStatus(selectedRequest.id, 'rejected');
+      await onRequestProcessed();
+    } catch (error) {
+      console.error("Error rejecting request:", error);
+      message.error("Failed to reject verification request");
+    }
   };
 
   const columns = [
@@ -130,102 +211,90 @@ export function VerificationRequestsTable({ requests, loading, onRequestProcesse
       title: 'Employee ID',
       dataIndex: 'employeeId',
       key: 'employeeId',
-      width: 120,
     },
     {
       title: 'Reason',
       dataIndex: 'reason',
       key: 'reason',
       ellipsis: true,
-      width: '30%',
     },
     {
-      title: 'Confidence',
-      dataIndex: 'confidence',
-      key: 'confidence',
-      width: 100,
-      render: (confidence: number) => `${(confidence * 100).toFixed(1)}%`,
+      title: 'Time',
+      dataIndex: 'timestamp',
+      key: 'timestamp',
+      render: (timestamp: string) => new Date(timestamp).toLocaleString(),
     },
     {
       title: 'Status',
       dataIndex: 'status',
       key: 'status',
-      width: 100,
       render: (status: string) => {
-        const statusConfig = {
-          pending: { color: 'gold', text: 'Pending' },
-          approved: { color: 'success', text: 'Approved' },
-          rejected: { color: 'error', text: 'Rejected' },
-        };
-        const config = statusConfig[status as keyof typeof statusConfig];
-        return <Tag color={config.color}>{config.text}</Tag>;
+        let color = 'default';
+        if (status === 'Pending') {
+          color = 'orange';
+        } else if (status === 'Approved') {
+          color = 'green';
+        } else if (status === 'Rejected') {
+          color = 'red';
+        }
+        return <Tag color={color}>{status}</Tag>;
       },
     },
     {
-      title: 'Submitted',
-      dataIndex: 'submittedAt',
-      key: 'submittedAt',
-      width: 180,
-      render: (date: string) => new Date(date).toLocaleString(),
+      title: 'Confidence',
+      dataIndex: 'confidence',
+      key: 'confidence',
+      render: (confidence: number) => {
+        const percent = (confidence * 100).toFixed(1);
+        let color = token.colorError;
+        if (confidence >= 0.8) {
+          color = token.colorSuccess;
+        } else if (confidence >= 0.6) {
+          color = token.colorWarning;
+        }
+        return (
+          <Text style={{ color }}>
+            {percent}%
+          </Text>
+        );
+      }
     },
     {
-      title: 'Action',
-      key: 'action',
-      width: 120,
-      fixed: 'right' as const,
+      title: 'Actions',
+      key: 'actions',
       render: (_: any, record: VerificationRequest) => (
-        <Button
-          type="link"
-          icon={<EyeOutlined />}
-          onClick={() => setSelectedRequest(record)}
-        >
-          View
-        </Button>
+        <Space size="small">
+          <Button 
+            type="primary" 
+            size="small" 
+            icon={<EyeOutlined />}
+            onClick={() => handleViewRequest(record)}
+          >
+            View
+          </Button>
+        </Space>
       ),
     },
   ];
 
   return (
     <>
-      <Table
-        columns={columns}
-        dataSource={requests}
-        loading={loading}
+      <Table 
+        dataSource={requests} 
+        columns={columns} 
         rowKey="id"
-        style={{ 
-          marginTop: token.marginMD,
-          backgroundColor: token.colorBgContainer,
-          borderRadius: token.borderRadiusLG,
-          boxShadow: token.boxShadowTertiary
-        }}
-        pagination={{
-          pageSize: 10,
-          position: ['bottomCenter'],
-          showSizeChanger: true,
-          showTotal: (total: number) => `Total ${total} items`
-        }}
-        scroll={{ x: 'max-content' }}
-        onRow={(record) => ({
-          onClick: () => setSelectedRequest(record),
-          style: {
-            cursor: 'pointer',
-            transition: 'background-color 0.3s',
-            '&:hover': {
-              backgroundColor: token.colorFillAlter
-            }
-          }
-        })}
+        loading={loading}
+        pagination={{ pageSize: 10 }}
       />
-
       {selectedRequest && (
         <RequestDetailsModal
           request={selectedRequest}
-          visible={true}
-          onClose={() => setSelectedRequest(null)}
-          onApprove={handleApprove}
-          onReject={handleReject}
+          visible={modalVisible}
+          onClose={() => setModalVisible(false)}
+          onApprove={handleApproveRequest}
+          onReject={handleRejectRequest}
         />
       )}
     </>
   );
-} 
+}

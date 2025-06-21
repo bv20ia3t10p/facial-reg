@@ -1,5 +1,5 @@
 import React, { useState } from 'react';
-import { Layout, Button, Space, Avatar, Typography, Switch, Drawer, Menu } from 'antd';
+import { Layout, Button, Space, Avatar, Typography, Switch, Drawer, Menu, message } from 'antd';
 import { useNavigate, useLocation } from 'react-router-dom';
 import {
   HomeOutlined,
@@ -11,8 +11,12 @@ import {
   BulbOutlined,
   BulbFilled,
   MenuOutlined,
+  LogoutOutlined,
+  UserAddOutlined,
 } from '@ant-design/icons';
 import { useTheme } from '../contexts/ThemeContext';
+import { logout, isAuthenticated } from '../services/auth';
+import { useUser } from '../contexts/UserContext';
 
 const { Header: AntHeader } = Layout;
 const { Text } = Typography;
@@ -45,14 +49,32 @@ export const Header: React.FC = () => {
   const location = useLocation();
   const { isDarkMode, toggleTheme } = useTheme();
   const [drawerVisible, setDrawerVisible] = useState(false);
+  const { isHRDepartment, clearUserData } = useUser();
+  
+  const handleLogout = () => {
+    logout();
+    clearUserData(); // Clear user context data
+    message.success('You have been logged out');
+    navigate('/authentication', { replace: true }); // Use replace to ensure history is updated
+    setDrawerVisible(false);
+  };
 
-  const menuItems = [
+  // Define base menu items (available to all authenticated users)
+  const baseMenuItems = [
     { key: '/', icon: <HomeOutlined />, text: 'Home' },
     { key: '/authentication', icon: <SafetyCertificateOutlined />, text: 'Authentication' },
     { key: '/analytics', icon: <BarChartOutlined />, text: 'Analytics' },
+  ];
+  
+  // Define HR-specific menu items (only visible to HR department users)
+  const hrMenuItems = [
     { key: '/hr-dashboard', icon: <TeamOutlined />, text: 'HR Dashboard' },
     { key: '/verification-requests', icon: <UserOutlined />, text: 'Verification' },
+    { key: '/add-user', icon: <UserAddOutlined />, text: 'Add User' },
   ];
+  
+  // Combine menu items based on user role
+  const menuItems = [...baseMenuItems, ...(isHRDepartment ? hrMenuItems : [])];
 
   const handleMenuClick = (path: string) => {
     navigate(path);
@@ -68,24 +90,54 @@ export const Header: React.FC = () => {
         border: 'none',
       }}
     >
-      {menuItems.map(item => (
-        <Menu.Item
-          key={item.key}
-          icon={item.icon}
-          onClick={() => handleMenuClick(item.key)}
-          style={{
-            color: location.pathname === item.key 
-              ? '#1DA1F2' 
-              : isDarkMode ? '#ffffff' : '#536471',
-          }}
-        >
-          {item.text}
-        </Menu.Item>
-      ))}
+      {menuItems.map(item => {
+        const isActive = location.pathname === item.key;
+        return (
+          <Menu.Item
+            key={item.key}
+            icon={item.icon}
+            onClick={() => handleMenuClick(item.key)}
+            style={{
+              color: isActive ? '#1DA1F2' : isDarkMode ? '#ffffff' : '#536471',
+              position: 'relative',
+              backgroundColor: isActive 
+                ? (isDarkMode ? 'rgba(29, 161, 242, 0.1)' : 'rgba(29, 161, 242, 0.05)')
+                : 'transparent',
+              borderRadius: '8px',
+              margin: '4px 0',
+              padding: '10px 16px',
+            }}
+          >
+            {item.text}
+            {isActive && (
+              <div
+                style={{
+                  position: 'absolute',
+                  left: 0,
+                  top: '50%',
+                  transform: 'translateY(-50%)',
+                  width: '3px',
+                  height: '70%',
+                  background: '#1DA1F2',
+                  borderRadius: '0 2px 2px 0',
+                  transition: 'all 0.3s ease',
+                }}
+              />
+            )}
+          </Menu.Item>
+        );
+      })}
       <Menu.Item
         key="settings"
         icon={<SettingOutlined />}
         onClick={() => handleMenuClick('/settings')}
+        style={{
+          color: isDarkMode ? '#ffffff' : '#536471',
+          position: 'relative',
+          borderRadius: '8px',
+          margin: '4px 0',
+          padding: '10px 16px',
+        }}
       >
         Settings
       </Menu.Item>
@@ -93,9 +145,32 @@ export const Header: React.FC = () => {
         key="theme"
         icon={isDarkMode ? <BulbFilled /> : <BulbOutlined />}
         onClick={toggleTheme}
+        style={{
+          color: isDarkMode ? '#ffffff' : '#536471',
+          position: 'relative',
+          borderRadius: '8px',
+          margin: '4px 0',
+          padding: '10px 16px',
+        }}
       >
         {isDarkMode ? 'Light Mode' : 'Dark Mode'}
       </Menu.Item>
+      {isAuthenticated() && (
+        <Menu.Item
+          key="logout"
+          icon={<LogoutOutlined />}
+          onClick={handleLogout}
+          style={{
+            color: '#ff4d4f',
+            position: 'relative',
+            borderRadius: '8px',
+            margin: '4px 0',
+            padding: '10px 16px',
+          }}
+        >
+          Logout
+        </Menu.Item>
+      )}
     </Menu>
   );
 
@@ -133,28 +208,61 @@ export const Header: React.FC = () => {
 
         {/* Desktop Menu */}
         <Space size={32} className="desktop-menu">
-          {menuItems.map(item => (
-            <Button
-              key={item.key}
-              type={location.pathname === item.key ? 'text' : 'link'}
-              icon={item.icon}
-              onClick={() => navigate(item.key)}
-              style={{
-                color: location.pathname === item.key 
-                  ? '#1DA1F2' 
-                  : isDarkMode ? '#ffffff' : '#536471',
-                fontWeight: location.pathname === item.key ? 'bold' : 'normal',
-              }}
-            >
-              <span className="menu-text">{item.text}</span>
-            </Button>
-          ))}
+          {menuItems.map(item => {
+            const isActive = location.pathname === item.key;
+            return (
+              <Button
+                key={item.key}
+                type="link"
+                icon={item.icon}
+                onClick={() => navigate(item.key)}
+                style={{
+                  color: isActive
+                    ? '#1DA1F2' 
+                    : isDarkMode ? '#ffffff' : '#536471',
+                  fontWeight: isActive ? '500' : 'normal',
+                  position: 'relative',
+                  padding: '4px 0',
+                  border: 'none',
+                  background: 'transparent',
+                  boxShadow: 'none',
+                  outline: 'none',
+                }}
+              >
+                <span className="menu-text">{item.text}</span>
+                {isActive && (
+                  <div
+                    style={{
+                      position: 'absolute',
+                      bottom: -8,
+                      left: 0,
+                      width: '100%',
+                      height: '3px',
+                      background: '#1DA1F2',
+                      borderRadius: '2px',
+                      transition: 'all 0.3s ease',
+                    }}
+                  />
+                )}
+              </Button>
+            );
+          })}
           <Switch
             checkedChildren={<BulbFilled />}
             unCheckedChildren={<BulbOutlined />}
             checked={isDarkMode}
             onChange={toggleTheme}
           />
+          {isAuthenticated() && (
+            <Button
+              type="text"
+              danger
+              icon={<LogoutOutlined />}
+              onClick={handleLogout}
+            >
+              <span className="menu-text">Logout</span>
+            </Button>
+          )}
         </Space>
 
         {/* Mobile Menu Button */}

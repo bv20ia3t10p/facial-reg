@@ -1,292 +1,589 @@
 """
-User management routes for the biometric authentication system
+User management routes for the API
 """
 
-from fastapi import APIRouter, Depends, HTTPException, status
-from sqlalchemy.orm import Session
-from typing import List, Optional, Dict
-from datetime import datetime, timedelta
-import logging
-from collections import defaultdict
+import io
 import json
+import logging
+import time
+from datetime import datetime
+from pathlib import Path
+from typing import List, Optional
+from zoneinfo import ZoneInfo
 
-from ..db.database import get_db, User, AuthenticationLog
-from ..utils.security import get_current_user, get_password_hash, verify_password
+from fastapi import APIRouter, BackgroundTasks, Depends, File, Form, HTTPException, UploadFile
+from PIL import Image
+from pydantic import BaseModel
+from sqlalchemy.orm import Session
+from sqlalchemy.sql import text
 
+from ..db.database import User, create_user, get_db
+from ..services.service_init import biometric_service
+from ..utils.face_recognition import FaceRecognizer
+from ..utils.security import get_current_user, get_password_hash
+from ..utils.common import generate_uuid
+from ..models.privacy_biometric_model import PrivacyBiometricModel
+
+# Configure logging
+logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
+
+# Detect system timezone
+try:
+    import platform
+    if platform.system() == 'Windows':
+        import tzlocal
+        system_timezone = tzlocal.get_localzone_name()
+    else:
+        import subprocess
+        system_timezone = subprocess.check_output(['timedatectl', 'show', '-p', 'Timezone', '--value']).decode('utf-8').strip()
+    logger.info(f"System timezone detected: {system_timezone}")
+except Exception as e:
+    logger.warning(f"Could not detect system timezone, defaulting to UTC: {e}")
+    system_timezone = 'UTC'
 
 # Initialize router
 router = APIRouter()
 
-def parse_emotion_data(emotion_data: Optional[Dict[str, float]]) -> Dict[str, float]:
-    """Parse and normalize emotion data"""
-    default_emotions = {
-        "happiness": 0.0,
-        "neutral": 1.0,
-        "surprise": 0.0,
-        "sadness": 0.0,
-        "anger": 0.0,
-        "disgust": 0.0,
-        "fear": 0.0
-    }
+# Initialize face recognizer
+face_recognizer = FaceRecognizer()
+
+# Global variable to track if model is being trained
+model_training_in_progress = False
+
+# Function to train the model in the background
+def train_model_task(db: Session = None):
+    global model_training_in_progress
     
-    if not emotion_data:
-        return default_emotions
-        
     try:
-        if isinstance(emotion_data, str):
-            emotion_data = json.loads(emotion_data)
+        # Prevent multiple training sessions
+        if model_training_in_progress:
+            logger.warning("Model training already in progress, skipping this request")
+            return
+        
+        model_training_in_progress = True
+        logger.info("Starting model training in background...")
+        
+        # Get a new database session if none was provided
+        close_db = False
+        if db is None:
+            from ..db.database import SessionLocal
+            db = SessionLocal()
+            close_db = True
+        
+        try:
+            # 1. Load all user face encodings from the database
+            logger.info("Loading user face encodings from database...")
+            users = db.execute(text("""
+                SELECT id, face_encoding FROM users
+                WHERE face_encoding IS NOT NULL
+                ORDER BY id
+            """)).fetchall()
             
-        # If the data has probabilities field, use that
-        if isinstance(emotion_data, dict) and 'probabilities' in emotion_data:
-            probabilities = emotion_data['probabilities']
-            
-            # Map the emotion names
-            emotion_map = {
-                'happy': 'happiness',
-                'surprised': 'surprise',
-                'sad': 'sadness',
-                'angry': 'anger',
-                'disgusted': 'disgust',
-                'fearful': 'fear',
-                'neutral': 'neutral'
-            }
-            
-            normalized = {}
-            for emotion, value in probabilities.items():
-                emotion_key = emotion_map.get(emotion.lower(), emotion.lower())
-                if emotion_key in default_emotions:
-                    # Ensure the value is between 0 and 1
-                    try:
-                        value = float(value)
-                        normalized[emotion_key] = max(0.0, min(1.0, value))
-                    except (ValueError, TypeError):
-                        normalized[emotion_key] = default_emotions[emotion_key]
-            
-            # Fill in missing emotions with defaults
-            for emotion in default_emotions:
-                if emotion not in normalized:
-                    normalized[emotion] = default_emotions[emotion]
-                    
-            return normalized
-            
-        # If it's already in the right format, just normalize the values
-        normalized = {}
-        for emotion, value in emotion_data.items():
-            if emotion in default_emotions:
-                try:
-                    value = float(value)
-                    normalized[emotion] = max(0.0, min(1.0, value))
-                except (ValueError, TypeError):
-                    normalized[emotion] = default_emotions[emotion]
-                    
-        # Fill in missing emotions with defaults
-        for emotion in default_emotions:
-            if emotion not in normalized:
-                normalized[emotion] = default_emotions[emotion]
+            if not users or len(users) == 0:
+                logger.warning("No users with face encodings found in database")
+                return
                 
-        return normalized
-    except (json.JSONDecodeError, AttributeError, ValueError):
-        return default_emotions
+            logger.info(f"Loaded face encodings for {len(users)} users")
+            
+            # 2. Train or update the model
+            import torch
+            import torch.nn as nn
+            import torch.optim as optim
+            import numpy as np
+            import os
+            
+            # Create models directory if it doesn't exist
+            models_dir = Path("/app/models")
+            models_dir.mkdir(exist_ok=True)
+            
+            # Prepare data - we need to extract features from raw face encodings
+            user_features = []
+            user_ids = []
+            
+            # Create a simple feature extractor to convert stored face encodings to feature vectors
+            feature_extractor = face_recognizer.model
+            feature_extractor.eval()  # Set to evaluation mode
+            
+            # Determine the feature dimension from the first encoding
+            feature_dim = None
+            
+            for i, user in enumerate(users):
+                try:
+                    # Load face encoding from database (this is already preprocessed)
+                    face_encoding_bytes = user.face_encoding
+                    
+                    # Convert bytes to numpy array
+                    face_encoding = np.frombuffer(face_encoding_bytes, dtype=np.float32)
+                    
+                    # If this is the first encoding, determine the feature dimension
+                    if feature_dim is None:
+                        feature_dim = face_encoding.shape[0]
+                        logger.info(f"Detected feature dimension: {feature_dim}")
+                    
+                    # Reshape to match expected dimensions
+                    face_encoding = face_encoding.reshape(1, -1)
+                    
+                    # Convert to torch tensor
+                    face_tensor = torch.from_numpy(face_encoding).float()
+                    
+                    # Add to features list
+                    user_features.append(face_tensor)
+                    user_ids.append(user.id)
+                    
+                    logger.debug(f"Processed face encoding for user {user.id}, shape: {face_tensor.shape}")
+                except Exception as e:
+                    logger.error(f"Error processing face encoding for user {user.id}: {e}")
+            
+            if not user_features:
+                logger.error("No valid face encodings found")
+                return
+                
+            # Stack features into a single tensor
+            features_tensor = torch.cat(user_features, dim=0)
+            labels_tensor = torch.tensor(list(range(len(user_features))), dtype=torch.long)
+            
+            logger.info(f"Prepared training data: {features_tensor.shape} features, {labels_tensor.shape} labels")
+            
+            # Create a simple dataset and dataloader
+            from torch.utils.data import TensorDataset, DataLoader
+            dataset = TensorDataset(features_tensor, labels_tensor)
+            dataloader = DataLoader(dataset, batch_size=4, shuffle=True)
+            
+            # Initialize model with the correct feature dimension
+            num_identities = len(users)
+            
+            # Create a model with the correct feature dimension from the start
+            logger.info(f"Creating model with {num_identities} identities and feature_dim={feature_dim}")
+            model = PrivacyBiometricModel(
+                num_identities=num_identities, 
+                embedding_dim=feature_dim,
+                privacy_enabled=True
+            )
+            
+            # Setup optimizer and loss function
+            optimizer = torch.optim.Adam(model.parameters(), lr=0.001)
+            criterion = torch.nn.CrossEntropyLoss()
+            
+            # Training for 20 epochs
+            logger.info("Beginning training for 20 epochs...")
+            for epoch in range(1, 21):
+                epoch_loss = 0.0
+                correct = 0
+                total = 0
+                
+                for batch_features, batch_labels in dataloader:
+                    optimizer.zero_grad()
+                    
+                    # Forward pass with the biometric model
+                    identity_logits, _ = model(batch_features)
+                    
+                    # Calculate loss
+                    loss = criterion(identity_logits, batch_labels)
+                    
+                    # Backward pass and optimize
+                    loss.backward()
+                    optimizer.step()
+                    
+                    # Track statistics
+                    epoch_loss += loss.item()
+                    _, predicted = torch.max(identity_logits, 1)
+                    total += batch_labels.size(0)
+                    correct += (predicted == batch_labels).sum().item()
+                
+                # Log epoch progress
+                logger.info(f"Epoch {epoch}: Loss={epoch_loss/len(dataloader):.4f}, Accuracy={correct/total*100:.2f}%")
+            
+            logger.info("Training completed, saving model...")
+            
+            # Create a mapping from model indices to user IDs
+            idx_to_user = {idx: user_id for idx, user_id in enumerate(user_ids)}
+            
+            # Save the mapping
+            with open(models_dir / "user_id_mapping.json", 'w') as f:
+                json.dump(idx_to_user, f)
+                
+            logger.info(f"Saved user ID mapping with {len(idx_to_user)} entries")
+            
+            # Save the model with metadata
+            client_id = os.getenv("CLIENT_ID", "client1")
+            model_metadata = {
+                'state_dict': model.state_dict(),
+                'num_identities': num_identities,
+                'feature_dim': feature_dim,
+                'privacy_enabled': True,
+                'client_id': client_id,
+                'timestamp': datetime.utcnow().isoformat()
+            }
+            torch.save(model_metadata, models_dir / f"best_{client_id}_pretrained_model.pth")
+            
+            logger.info(f"Model saved as best_{client_id}_pretrained_model.pth")
+            
+            # Request model reload
+            asyncio.create_task(reload_model())
+            
+            logger.info("Model training task completed successfully")
+            
+        except Exception as e:
+            logger.error(f"Error during model training: {e}")
+        finally:
+            if close_db:
+                db.close()
+            
+    except Exception as e:
+        logger.error(f"Failed to train model: {e}")
+    finally:
+        model_training_in_progress = False
+
+async def reload_model():
+    """Reload the model after training"""
+    try:
+        logger.info("Reloading model...")
+        
+        # Reload in BiometricService through service_init
+        from ..services.service_init import reload_biometric_service
+        if reload_biometric_service:
+            success = reload_biometric_service()
+            if success:
+                logger.info("Reloaded model through service_init")
+            else:
+                logger.warning("Model reload through service_init returned False")
+        
+        logger.info("Model reload completed")
+    except Exception as e:
+        logger.error(f"Failed to reload model: {e}")
 
 @router.get("/{user_id}")
-async def get_user_info(
-    user_id: str,
-    db: Session = Depends(get_db)
-):
-    """Get user information by ID"""
+async def get_user_info(user_id: str, db: Session = Depends(get_db)):
+    """Get user information and authentication history"""
     try:
-        logger.info(f"Looking up user with ID: {user_id}")
+        # Get authentication stats from authentication_logs with explicit transaction
+        stats_query = db.execute(text("""
+            SELECT 
+                COUNT(*) as total_attempts,
+                SUM(CASE WHEN success THEN 1 ELSE 0 END) as successful_attempts,
+                AVG(confidence) as avg_confidence,
+                MAX(created_at) as last_authenticated
+            FROM authentication_logs 
+            WHERE user_id = :user_id;
+        """), {"user_id": user_id})
+        stats = stats_query.fetchone()
         
-        # Get user with detailed logging
-        user = db.query(User).filter(User.id == user_id).first()
+        # Get recent authentications with fresh query
+        recent_query = db.execute(text("""
+            SELECT id, user_id, success, confidence, emotion_data, created_at, device_info
+            FROM authentication_logs
+            WHERE user_id = :user_id
+            ORDER BY datetime(created_at) DESC
+            LIMIT 20
+        """), {"user_id": user_id})
+        recent_auths = list(recent_query)  # Materialize the results
+        
+        # Get user data - all fields except face_encoding (BLOB)
+        user_query = db.execute(text("""
+            SELECT id, name, email, department, role, password_hash, created_at, last_authenticated
+            FROM users 
+            WHERE id = :user_id
+        """), {"user_id": user_id})
+        user = user_query.fetchone()
+        
+        # If user not found in database, check folder structure
         if not user:
-            logger.warning(f"User not found: {user_id}")
-            raise HTTPException(
-                status_code=status.HTTP_404_NOT_FOUND,
-                detail=f"User not found: {user_id}"
-            )
+            data_path = Path("/app/data")
+            user_folder = data_path / user_id
+            
+            if not user_folder.exists() or not user_folder.is_dir():
+                raise HTTPException(
+                    status_code=404,
+                    detail=f"User {user_id} not found"
+                )
         
-        logger.info(f"Found user: {user.name} ({user.id})")
+        # Log what we found
+        logger.info(f"Found {len(recent_auths)} recent authentications for user {user_id}")
+        if recent_auths:
+            latest_auth = recent_auths[0]
+            logger.info(f"Latest auth: ID={latest_auth.id}, timestamp={latest_auth.created_at}")
         
-        # Get authentication history with logging
-        auth_history = db.query(AuthenticationLog).filter(
-            AuthenticationLog.user_id == user_id
-        ).order_by(AuthenticationLog.created_at.desc()).all()
-        
-        logger.info(f"Found {len(auth_history)} authentication records for user {user_id}")
-        
-        # Calculate authentication stats
-        total_attempts = len(auth_history)
-        successful_attempts = sum(1 for auth in auth_history if auth.success)
-        success_rate = (successful_attempts / total_attempts * 100) if total_attempts > 0 else 0
-        avg_confidence = sum(auth.confidence for auth in auth_history) / total_attempts if total_attempts > 0 else 0
-        
-        # Get latest authentication and emotion data
-        latest_auth = auth_history[0] if auth_history else None
+        # Convert datetime objects to ISO format strings
+        def format_datetime(dt):
+            if dt:
+                try:
+                    if isinstance(dt, str):
+                        # Try to parse string to datetime first
+                        dt = datetime.fromisoformat(dt.replace('Z', '+00:00'))
+                    # Ensure datetime is UTC
+                    if dt.tzinfo is None:
+                        dt = dt.replace(tzinfo=ZoneInfo('UTC'))
+                    # Convert to local timezone
+                    local_dt = dt.astimezone(ZoneInfo(system_timezone))
+                    return local_dt.isoformat()
+                except Exception as e:
+                    logger.error(f"Error formatting datetime {dt}: {e}")
+                    return dt
+            return None
+
+        # Get the latest authentication with emotion data
         latest_emotion_data = None
-        if latest_auth and latest_auth.emotion_data:
-            latest_emotion_data = parse_emotion_data(latest_auth.emotion_data)
-        
-        # Calculate emotion trends
-        emotion_sums = defaultdict(float)
-        emotion_counts = defaultdict(int)
-        
-        for auth in auth_history:
-            if auth.emotion_data:
-                emotion_data = parse_emotion_data(auth.emotion_data)
-                for emotion, value in emotion_data.items():
-                    emotion_sums[emotion] += float(value)
-                    emotion_counts[emotion] += 1
-        
-        # Calculate averages
-        avg_emotions = {}
-        for emotion in emotion_sums:
-            if emotion_counts[emotion] > 0:
-                avg_emotions[emotion] = round(emotion_sums[emotion] / emotion_counts[emotion], 16)
-            else:
-                avg_emotions[emotion] = 0.0
-        
-        # Find dominant emotion
-        dominant_emotion = "neutral"
-        if avg_emotions:
-            dominant_emotion = max(avg_emotions.items(), key=lambda x: x[1])[0]
-        
-        # Prepare response
-        response = {
-            "user_id": str(user.id),
-            "name": user.name,
-            "email": user.email,
-            "department": user.department or "Unknown",
-            "role": user.role or "User",
-            "enrolled_at": user.created_at.isoformat(),
-            "last_authenticated": latest_auth.created_at.isoformat() if latest_auth else None,
+        if recent_auths:
+            for auth in recent_auths:
+                if auth.emotion_data:
+                    try:
+                        latest_emotion_data = json.loads(auth.emotion_data)
+                        break
+                    except Exception as e:
+                        logger.error(f"Error parsing emotion data: {e}")
+
+        # Format authentication attempts
+        formatted_attempts = []
+        for auth in recent_auths:
+            try:
+                emotion_data = json.loads(auth.emotion_data) if auth.emotion_data else None
+                formatted_attempts.append({
+                    "id": auth.id,
+                    "user_id": auth.user_id,
+                    "success": bool(auth.success),
+                    "confidence": float(auth.confidence),
+                    "timestamp": format_datetime(auth.created_at),
+                    "emotion_data": emotion_data,
+                    "device_info": auth.device_info
+                })
+            except Exception as e:
+                logger.error(f"Error formatting authentication attempt: {e}")
+                continue
+
+        # Calculate success rate
+        total_attempts = stats.total_attempts if stats else 0
+        successful_attempts = stats.successful_attempts if stats else 0
+        success_rate = (successful_attempts / total_attempts * 100) if total_attempts > 0 else 0
+        avg_confidence = float(stats.avg_confidence) if stats and stats.avg_confidence else 0
+
+        return {
+            "user_id": user.id if user else user_id,
+            "name": user.name if user else f"User {user_id}",
+            "email": user.email if user else None,
+            "department": user.department if user else None,
+            "role": user.role if user else None,
+            "enrolled_at": format_datetime(user.created_at) if user and user.created_at else None,
+            "last_authenticated": format_datetime(user.last_authenticated) if user and user.last_authenticated else None,
             "authentication_stats": {
                 "total_attempts": total_attempts,
                 "successful_attempts": successful_attempts,
                 "success_rate": success_rate,
                 "average_confidence": avg_confidence
             },
-            "recent_attempts": [
-                {
-                    "timestamp": auth.created_at.isoformat(),
-                    "success": bool(auth.success),
-                    "confidence": float(auth.confidence),
-                    "emotion_data": parse_emotion_data(auth.emotion_data)
-                }
-                for auth in auth_history[:5]  # Last 5 attempts
-            ],
-            "latest_auth": {
-                "timestamp": latest_auth.created_at.isoformat() if latest_auth else None,
-                "confidence": float(latest_auth.confidence) if latest_auth else None,
-                "emotion_data": latest_emotion_data or parse_emotion_data(None)
-            },
-            "emotional_state": latest_emotion_data or parse_emotion_data(None),
-            "emotion_trends": {
-                "average": avg_emotions,
-                "dominant": dominant_emotion
+            "recent_attempts": formatted_attempts,
+            "latest_auth": formatted_attempts[0] if formatted_attempts else None,
+            "emotional_state": latest_emotion_data or {
+                "neutral": 1.0,
+                "happy": 0.0,
+                "sad": 0.0,
+                "angry": 0.0,
+                "surprised": 0.0,
+                "fearful": 0.0,
+                "disgusted": 0.0
             }
         }
-        
-        logger.info(f"Successfully retrieved user info for {user_id}")
-        return response
-        
+            
     except HTTPException:
         raise
     except Exception as e:
-        logger.error(f"Failed to get user info for {user_id}: {str(e)}", exc_info=True)
+        logger.error(f"Failed to get user info: {str(e)}")
+        db.rollback()
         raise HTTPException(
-            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
-            detail=str(e)
-        )
+            status_code=500,
+            detail=f"Failed to get user information: {str(e)}"
+        ) 
 
-@router.get("/me")
-async def get_current_user_info(
-    current_user: User = Depends(get_current_user),
-    db: Session = Depends(get_db)
+# User registration model
+class UserRegistration(BaseModel):
+    name: str
+    email: str
+    department: str
+    role: str
+
+@router.post("/register")
+async def register_user(
+    background_tasks: BackgroundTasks,
+    name: str = Form(...),
+    email: str = Form(...),
+    department: str = Form(...),
+    role: str = Form(...),
+    images: List[UploadFile] = File(...),
+    db: Session = Depends(get_db),
+    current_user: User = Depends(get_current_user)
 ):
-    """Get current user information"""
+    """Register a new user with face images for biometric authentication"""
     try:
-        user = db.query(User).filter(User.id == current_user.id).first()
-        if not user:
+        # Check if the current user has HR permissions
+        if current_user.department.lower() != "hr" and current_user.role != "admin":
             raise HTTPException(
-                status_code=status.HTTP_404_NOT_FOUND,
-                detail="User not found"
+                status_code=403,
+                detail="Only HR department or admin users can register new users"
             )
+        
+        # Check if user with this email already exists
+        existing_user = db.execute(
+            text("SELECT id FROM users WHERE email = :email"),
+            {"email": email}
+        ).fetchone()
+        
+        if existing_user:
+            raise HTTPException(
+                status_code=400,
+                detail=f"User with email {email} already exists"
+            )
+        
+        # Process face images
+        if not images or len(images) == 0:
+            raise HTTPException(
+                status_code=400,
+                detail="At least one face image is required"
+            )
+        
+        # Generate a user ID greater than any existing ID
+        user_id = generate_uuid()
+        logger.info(f"Generated user ID '{user_id}' for new user registration")
+        user_data_dir = Path(f"/app/data/{user_id}")
+        user_data_dir.mkdir(parents=True, exist_ok=True)
+        
+        # Process and save face images
+        face_features = None
+        for i, image_file in enumerate(images):
+            try:
+                # Read image data
+                image_data = await image_file.read()
+                
+                # Save image to user directory
+                image_path = user_data_dir / f"face_{i}.jpg"
+                with open(image_path, "wb") as f:
+                    f.write(image_data)
+                
+                # Process image for face recognition
+                image = Image.open(io.BytesIO(image_data))
+                aligned_face = face_recognizer.align_face(image)
+                
+                # Extract face features
+                tensor = face_recognizer.preprocess_image(aligned_face)
+                features = face_recognizer.extract_features(tensor)
+                
+                # Use the first image's features for the user record
+                if face_features is None:
+                    face_features = face_recognizer.save_features(features)
+            
+            except Exception as e:
+                logger.error(f"Error processing image {i}: {e}")
+                continue
+        
+        if face_features is None:
+            raise HTTPException(
+                status_code=400,
+                detail="Failed to process face images. Please ensure images contain clear faces."
+            )
+        
+        # Always use "demo" as password
+        user_password = "demo"
+        
+        # Create user record
+        password_hash = get_password_hash(user_password)
+        user_data = {
+            "id": user_id,
+            "name": name,
+            "email": email,
+            "department": department,
+            "role": role,
+            "password_hash": password_hash,
+            "face_encoding": face_features,
+            "created_at": datetime.utcnow()
+        }
+        
+        new_user = create_user(db, user_data)
+        if not new_user:
+            raise HTTPException(
+                status_code=500,
+                detail="Failed to create user record"
+            )
+        
+        # Automatically trigger model training in the background
+        # This won't block the API response
+        background_tasks.add_task(train_model_task)
+        
         return {
-            "id": str(user.id),
-            "name": user.name,
-            "email": user.email,
-            "department": user.department,
-            "role": user.role,
-            "created_at": user.created_at.isoformat(),
-            "last_authenticated": user.last_authenticated.isoformat() if user.last_authenticated else None
+            "success": True,
+            "message": f"User registered successfully with default password: {user_password}. Model training started in the background.",
+            "user_id": user_id,
+            "name": name,
+            "email": email,
+            "department": department,
+            "role": role
+        }
+            
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"Failed to register user: {str(e)}")
+        db.rollback()
+        raise HTTPException(
+            status_code=500,
+            detail=f"Failed to register user: {str(e)}"
+        ) 
+
+@router.post("/reload-model")
+async def reload_model_endpoint(
+    background_tasks: BackgroundTasks,
+    db: Session = Depends(get_db),
+    current_user: User = Depends(get_current_user)
+):
+    """Reload the biometric model without retraining"""
+    try:
+        # Check if global biometric service is initialized
+        if not biometric_service:
+            logger.error("Global biometric service not initialized")
+            raise HTTPException(
+                status_code=500, 
+                detail="Biometric service not initialized"
+            )
+        
+        # Reload the model
+        biometric_service.reload_model()
+        
+        return {
+            "success": True,
+            "message": "Model reloaded successfully"
         }
     except Exception as e:
-        logger.error(f"Failed to get user info: {e}")
+        logger.error(f"Failed to reload model: {e}")
         raise HTTPException(
-            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
-            detail=str(e)
+            status_code=500,
+            detail=f"Failed to reload model: {str(e)}"
         )
 
-@router.get("/department/{department}")
-async def get_department_users(
-    department: str,
-    current_user: User = Depends(get_current_user),
-    db: Session = Depends(get_db)
+@router.post("/train-model")
+async def train_model_endpoint(
+    background_tasks: BackgroundTasks,
+    db: Session = Depends(get_db),
+    current_user: User = Depends(get_current_user)
 ):
-    """Get users in a department"""
+    """Endpoint to train the model on all users"""
     try:
-        users = db.query(User).filter(User.department == department).all()
-        return [
-            {
-                "id": str(user.id),
-                "username": user.username,
-                "email": user.email,
-                "full_name": user.full_name,
-                "created_at": user.created_at.isoformat(),
-                "last_login": user.last_login.isoformat() if user.last_login else None
-            }
-            for user in users
-        ]
-    except Exception as e:
-        logger.error(f"Failed to get department users: {e}")
-        raise HTTPException(
-            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
-            detail=str(e)
-        )
-
-@router.put("/me/password")
-async def update_password(
-    current_password: str,
-    new_password: str,
-    current_user: User = Depends(get_current_user),
-    db: Session = Depends(get_db)
-):
-    """Update user password"""
-    try:
-        user = db.query(User).filter(User.id == current_user.id).first()
-        if not user:
+        # Only allow HR or admin to access this endpoint
+        if current_user.department.lower() != "hr" and current_user.role != "admin":
             raise HTTPException(
-                status_code=status.HTTP_404_NOT_FOUND,
-                detail="User not found"
+                status_code=403,
+                detail="Only HR department or admin users can trigger model training"
             )
         
-        if not verify_password(current_password, user.hashed_password):
-            raise HTTPException(
-                status_code=status.HTTP_401_UNAUTHORIZED,
-                detail="Incorrect password"
-            )
+        # Start training in background
+        background_tasks.add_task(train_model_task, db)
         
-        user.hashed_password = get_password_hash(new_password)
-        user.updated_at = datetime.utcnow()
-        db.commit()
-        
-        return {"message": "Password updated successfully"}
-        
+        return {
+            "message": "Model training started in background",
+            "success": True
+        }
+    except HTTPException:
+        raise
     except Exception as e:
-        logger.error(f"Failed to update password: {e}")
+        logger.error(f"Failed to start model training: {e}")
         raise HTTPException(
-            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
-            detail=str(e)
+            status_code=500,
+            detail=f"Failed to start model training: {str(e)}"
         ) 

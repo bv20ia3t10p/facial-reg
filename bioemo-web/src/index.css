@@ -68,7 +68,7 @@ button:hover {
 }
 button:focus,
 button:focus-visible {
-  outline: 4px auto -webkit-focus-ring-color;
+  outline: none;
 }
 
 @media (prefers-color-scheme: light) {
@@ -406,4 +406,31 @@ button:focus-visible {
   [data-theme='dark'] .mobile-menu-button::after {
     background-image: radial-gradient(circle, #ffffff 10%, transparent 10.01%);
   }
+}
+
+/* Fix for navigation button outlines */
+.desktop-menu .ant-btn {
+  outline: none !important;
+  box-shadow: none !important;
+}
+
+.desktop-menu .ant-btn:focus,
+.desktop-menu .ant-btn:active,
+.desktop-menu .ant-btn:hover {
+  outline: none !important;
+  box-shadow: none !important;
+  border-color: transparent !important;
+}
+
+/* Override default focus styles */
+button:focus,
+button:focus-visible {
+  outline: none;
+}
+
+/* Additional mobile menu fixes */
+.ant-drawer .ant-menu-item:focus,
+.ant-drawer .ant-menu-item:active {
+  outline: none !important;
+  box-shadow: none !important;
 }

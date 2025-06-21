@@ -6,13 +6,16 @@ from passlib.context import CryptContext
 import secrets
 import string
 import logging
-from typing import Tuple, Optional
+from typing import Tuple, Optional, Union
 from fastapi import Depends, HTTPException, status
 from fastapi.security import OAuth2PasswordBearer
 from jose import JWTError, jwt
 from datetime import datetime, timedelta
 from pydantic import BaseModel
-import uuid
+from sqlalchemy.orm import Session
+
+from ..db.database import User, get_db
+from .common import generate_uuid
 
 logger = logging.getLogger(__name__)
 
@@ -24,22 +27,19 @@ pwd_context = CryptContext(
 )
 
 # JWT settings
-SECRET_KEY = "your-secret-key-here"  # Change this in production!
+SECRET_KEY = "8Zj8XbfpyaD4m7Af9VQJKTbGQxUW3Zm9CHZRYNLuEXxNLFmHm6G2PeZhVhyQ7kGx"  # Replace with environment variable in production
 ALGORITHM = "HS256"
-ACCESS_TOKEN_EXPIRE_MINUTES = 30
+ACCESS_TOKEN_EXPIRE_MINUTES = 1440  # 24 hours
 
 oauth2_scheme = OAuth2PasswordBearer(tokenUrl="token")
 
 class TokenData(BaseModel):
-    username: Optional[str] = None
+    user_id: Optional[str] = None
 
-class User(BaseModel):
-    username: str
-    email: Optional[str] = None
-    full_name: Optional[str] = None
-    disabled: Optional[bool] = None
-
-async def get_current_user(token: str = Depends(oauth2_scheme)) -> User:
+async def get_current_user(
+    token: str = Depends(oauth2_scheme),
+    db: Session = Depends(get_db)
+) -> User:
     """Get current user from JWT token"""
     credentials_exception = HTTPException(
         status_code=status.HTTP_401_UNAUTHORIZED,
@@ -48,22 +48,15 @@ async def get_current_user(token: str = Depends(oauth2_scheme)) -> User:
     )
     try:
         payload = jwt.decode(token, SECRET_KEY, algorithms=[ALGORITHM])
-        username: str = payload.get("sub")
-        if username is None:
+        user_id: str = payload.get("sub")
+        if user_id is None:
             raise credentials_exception
-        token_data = TokenData(username=username)
+        token_data = TokenData(user_id=user_id)
     except JWTError:
         raise credentials_exception
     
-    # Here you would typically get the user from your database
-    # For now, we'll return a mock user
-    user = User(
-        username=token_data.username,
-        email=f"{token_data.username}@example.com",
-        full_name=f"User {token_data.username}",
-        disabled=False
-    )
-    
+    # Get user from database
+    user = db.query(User).filter(User.id == token_data.user_id).first()
     if user is None:
         raise credentials_exception
     return user
@@ -191,6 +184,19 @@ def verify_api_key(api_key: str, hashed_key: str) -> bool:
         logger.error(f"API key verification failed: {e}")
         return False
 
-def generate_uuid() -> str:
-    """Generate a unique identifier"""
-    return str(uuid.uuid4()) 
+def authenticate_user(db: Session, email: str, password: str) -> Union[User, bool]:
+    """Authenticate a user with email and password"""
+    try:
+        # Find user by email
+        user = db.query(User).filter(User.email == email).first()
+        
+        # If no user found or password doesn't match
+        if not user or not verify_password(password, user.password_hash):
+            return False
+            
+        # Return the user if authentication was successful
+        return user
+        
+    except Exception as e:
+        logger.error(f"User authentication failed: {e}")
+        return False

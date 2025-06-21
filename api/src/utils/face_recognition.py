@@ -222,7 +222,7 @@ class FaceRecognizer:
         """Save feature tensor to bytes"""
         try:
             # Convert to numpy and serialize
-            features_np = features.cpu().numpy()
+            features_np = features.detach().cpu().numpy()
             bio = BytesIO()
             np.save(bio, features_np)
             return bio.getvalue()

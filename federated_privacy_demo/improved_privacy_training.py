@@ -60,9 +60,9 @@ def create_improved_config():
         'batch_size': 32,
         'pretrain_batch_size': 32,
         'pretrain_epochs': 50,  # Server pretraining epochs
-        'client_epochs': 3,  # Client epochs = half of server epochs
-        'pretrain_lr': 0.001,  # Increased learning rate
+        'client_epochs': 50,  # Client epochs = half of server e
         'weight_decay': 1e-5,  # Reduced weight decay
+        'pretrain_lr': 0.001,  # Increased learning rate
         'pretrain_scheduler_step': 10,  # Less frequent LR decay
         'pretrain_scheduler_gamma': 0.7,  # Less aggressive decay
         'val_split': 0.2,
@@ -671,7 +671,7 @@ def create_data_loaders(batch_size=16):
     transform = train_transform
     
     data_loaders = {}
-    partitioned_path = "data/partitioned"
+    partitioned_path = "./data/partitioned"
     
     # Check if partitioned data exists
     if not os.path.exists(partitioned_path):
