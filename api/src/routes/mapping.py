@@ -11,6 +11,9 @@ from fastapi import APIRouter, HTTPException, Body, Depends, Request
 from fastapi.responses import JSONResponse
 from pydantic import BaseModel
 
+# Import the mapping service
+from ..services.mapping_service import MappingService
+
 # Configure logging
 logger = logging.getLogger(__name__)
 
@@ -22,6 +25,18 @@ GLOBAL_MAPPING_PATH = Path("/app/models/mappings/global_mapping.json")
 
 # Memory cache for faster access
 _global_mapping_cache = None
+
+# Global mapping service instance
+mapping_service = None
+
+def get_mapping_service() -> MappingService:
+    """Get or create mapping service instance"""
+    global mapping_service
+    if mapping_service is None:
+        mapping_service = MappingService()
+        # Initialize mapping
+        mapping_service.initialize_mapping()
+    return mapping_service
 
 class MappingUpdateRequest(BaseModel):
     """Request model for updating global mapping"""
@@ -194,29 +209,53 @@ async def refresh_global_mapping():
         logger.error(f"Error refreshing global mapping: {e}")
         raise HTTPException(status_code=500, detail=f"Failed to refresh global mapping: {str(e)}")
 
+# Removed duplicate debug endpoint - using the one below with filtered mapping support
+
 @router.get("/api/mapping/debug")
-async def debug_mapping():
-    """Debug endpoint to view the current mapping status"""
+async def debug_mapping_info():
+    """Debug endpoint to show current mapping configuration"""
     try:
-        # Check if mapping file exists
-        file_exists = GLOBAL_MAPPING_PATH.exists()
-        file_size = GLOBAL_MAPPING_PATH.stat().st_size if file_exists else 0
+        service = get_mapping_service()
+        client_id = os.getenv("CLIENT_ID", "client1")
         
-        # Get current mapping
-        mapping = get_current_mapping()
+        # Get global mapping
+        global_mapping = service.get_mapping()
         
-        # Get sample entries
-        sample = {k: mapping[k] for k in list(mapping.keys())[:5]} if mapping else {}
+        # Get filtered mapping for client
+        filtered_mapping = service.get_filtered_mapping_for_client(client_id)
+        
+        # Get some sample mappings
+        sample_predictions = {}
+        if filtered_mapping:
+            # Show how model predictions map to identities
+            for model_class in range(min(10, len(filtered_mapping))):
+                identity = service.get_identity_by_model_class(model_class, use_filtered=True)
+                sample_predictions[f"model_class_{model_class}"] = identity
         
         return {
             "success": True,
-            "file_exists": file_exists,
-            "file_path": str(GLOBAL_MAPPING_PATH),
-            "file_size": file_size,
-            "mapping_count": len(mapping),
-            "cache_active": _global_mapping_cache is not None,
-            "sample_entries": sample
+            "debug_info": {
+                "client_id": client_id,
+                "environment_vars": {
+                    "CLIENT_ID": os.getenv("CLIENT_ID"),
+                    "NODE_TYPE": os.getenv("NODE_TYPE"),
+                    "MODEL_PATH": os.getenv("MODEL_PATH")
+                },
+                "global_mapping": {
+                    "count": len(global_mapping) if global_mapping else 0,
+                    "sample": dict(list(global_mapping.items())[:5]) if global_mapping else {}
+                },
+                "filtered_mapping": {
+                    "count": len(filtered_mapping) if filtered_mapping else 0,
+                    "sample": dict(list(filtered_mapping.items())[:5]) if filtered_mapping else {},
+                    "client_data_dir": service.client_data_dir
+                },
+                "sample_model_predictions": sample_predictions,
+                "mapping_metadata": service.get_mapping_info()
+            }
         }
     except Exception as e:
         logger.error(f"Error in debug mapping: {e}")
-        return {"success": False, "error": str(e)} 
+        raise HTTPException(status_code=500, detail=str(e))
+
+# Legacy function exports for compatibility - removed duplicates 

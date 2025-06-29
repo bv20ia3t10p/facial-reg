@@ -32,15 +32,37 @@ class EmotionAnalyzer:
         """Analyze emotions in an image using the emotion API"""
         try:
             endpoint = f"{self.api_url}/predict"
+            logger.info(f"Calling emotion API at: {endpoint}")
             
-            async with aiohttp.ClientSession() as session:
-                async with session.post(endpoint, data={'image': image_data}) as response:
+            # Create form data with proper file upload format
+            form_data = aiohttp.FormData()
+            form_data.add_field('file', image_data, content_type='image/jpeg', filename='image.jpg')
+            
+            timeout = aiohttp.ClientTimeout(total=30)  # 30 second timeout
+            
+            async with aiohttp.ClientSession(timeout=timeout) as session:
+                async with session.post(endpoint, data=form_data) as response:
                     if response.status == 200:
                         result = await response.json()
-                        return result.get('emotions', {})
+                        logger.info(f"Emotion API response: {result}")
+                        
+                        # The emotion API returns the emotions directly, not nested in 'emotions' key
+                        # Filter out non-emotion fields like 'reliability'
+                        emotion_fields = ['neutral', 'happiness', 'surprise', 'sadness', 'anger', 'disgust', 'fear']
+                        emotions = {key: value for key, value in result.items() if key in emotion_fields}
+                        
+                        if not emotions:
+                            logger.warning("No valid emotion data in response, using full result")
+                            emotions = result
+                            
+                        return emotions
                     else:
-                        logger.error(f"Emotion API error: {response.status}")
+                        error_text = await response.text()
+                        logger.error(f"Emotion API error: {response.status} - {error_text}")
                         return {}
+        except aiohttp.ClientError as e:
+            logger.error(f"HTTP client error calling emotion API: {e}")
+            return {}
         except Exception as e:
             logger.error(f"Failed to analyze emotion: {e}")
             return {} 

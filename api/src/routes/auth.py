@@ -106,6 +106,76 @@ def with_db_retry(max_retries=3, retry_delay=1):
         return wrapper
     return decorator
 
+def format_emotion_data(emotion_data):
+    """
+    Convert emotion data to the format expected by the frontend
+    """
+    if not emotion_data:
+        return {
+            "happiness": 0.0,
+            "neutral": 1.0,  # Default to neutral if no emotion data
+            "surprise": 0.0,
+            "sadness": 0.0,
+            "anger": 0.0,
+            "disgust": 0.0,
+            "fear": 0.0
+        }
+    
+    # Handle different emotion data formats
+    if isinstance(emotion_data, str):
+        try:
+            emotion_data = json.loads(emotion_data)
+        except json.JSONDecodeError:
+            logger.warning("Failed to parse emotion data JSON")
+            emotion_data = {}
+    
+    # Normalize emotion keys and ensure all required emotions are present
+    formatted_emotions = {
+        "happiness": 0.0,
+        "neutral": 0.0,
+        "surprise": 0.0,
+        "sadness": 0.0,
+        "anger": 0.0,
+        "disgust": 0.0,
+        "fear": 0.0
+    }
+    
+    # Map common emotion field variations to standardized names
+    emotion_mappings = {
+        'happy': 'happiness',
+        'neutral': 'neutral',
+        'surprised': 'surprise',
+        'surprise': 'surprise',
+        'sad': 'sadness',
+        'sadness': 'sadness',
+        'angry': 'anger',
+        'anger': 'anger',
+        'disgusted': 'disgust',
+        'disgust': 'disgust',
+        'fearful': 'fear',
+        'fear': 'fear'
+    }
+    
+    # Extract emotion values from the input data
+    for key, value in emotion_data.items():
+        # Normalize key to lowercase
+        normalized_key = key.lower()
+        
+        # Map to standard emotion name
+        if normalized_key in emotion_mappings:
+            standard_emotion = emotion_mappings[normalized_key]
+            if isinstance(value, (int, float)):
+                formatted_emotions[standard_emotion] = float(value)
+        elif normalized_key in formatted_emotions:
+            if isinstance(value, (int, float)):
+                formatted_emotions[normalized_key] = float(value)
+    
+    # Ensure values are between 0 and 1
+    for emotion, value in formatted_emotions.items():
+        formatted_emotions[emotion] = max(0.0, min(1.0, value))
+    
+    return formatted_emotions
+
 async def process_authentication(db, image_data, email=None, password=None, device_info=""):
     """
     Process an authentication request using facial recognition and/or password
@@ -116,10 +186,16 @@ async def process_authentication(db, image_data, email=None, password=None, devi
         
         if local_biometric_svc is None:
             logger.error("Could not obtain a biometric service")
+            auth_time = datetime.utcnow()
             return {
                 "success": False,
+                "message": "Biometric service unavailable",
                 "error": "Biometric service unavailable",
-                "authenticated_at": datetime.utcnow().isoformat()
+                "user_id": "",
+                "confidence": 0.0,
+                "threshold": 0.7,
+                "authenticated_at": auth_time.isoformat() + "Z",
+                "emotions": format_emotion_data(None)
             }
         
         # Get directory structure first
@@ -184,7 +260,7 @@ async def process_authentication(db, image_data, email=None, password=None, devi
         # Get predicted user ID and confidence
         predicted_user_id = prediction.get('user_id')
         confidence = prediction.get('confidence', 0.0)
-        threshold = 0.5  # Default threshold
+        threshold = 0.7  # Match frontend default threshold
         
         # IMPORTANT: Always use the model's prediction
         logger.info(f"Using model's predicted user ID: {predicted_user_id}")
@@ -237,12 +313,14 @@ async def process_authentication(db, image_data, email=None, password=None, devi
         )
         
         # Analyze emotion if available
+        emotion_result = None
         try:
-            emotion_data = await emotion_analyzer.analyze_emotion(image_data)
-            if emotion_data:
-                auth_log.emotion_data = json.dumps(emotion_data)
+            emotion_result = await emotion_analyzer.analyze_emotion(image_data)
+            if emotion_result:
+                auth_log.emotion_data = json.dumps(emotion_result)
         except Exception as e:
             logger.warning(f"Emotion analysis failed: {e}")
+            emotion_result = None
         
         # Save the authentication log
         try:
@@ -277,30 +355,43 @@ async def process_authentication(db, image_data, email=None, password=None, devi
         except Exception as update_error:
             logger.error(f"Failed to update last_authenticated: {update_error}")
         
-        # Return the authentication result
+        # Format emotion data for frontend
+        formatted_emotions = format_emotion_data(emotion_result)
+        
+        # Return the authentication result in the format expected by the frontend
         return {
             "success": True,
             "message": "Authentication successful",
+            "user_id": user.id,  # Required by frontend
+            "confidence": confidence,
+            "threshold": threshold,  # Required by frontend
+            "authenticated_at": auth_time.isoformat() + "Z",  # Required by frontend with Z suffix
+            "token": access_token,
+            "token_type": "bearer",
             "user": {
                 "id": user.id,
                 "name": user.name,
                 "email": user.email,
                 "department": user.department,
                 "role": user.role,
-                "created_at": user.created_at.isoformat() if user.created_at else None,
-                "last_authenticated": user.last_authenticated.isoformat() if user.last_authenticated else None
+                "created_at": user.created_at.isoformat() + "Z" if user.created_at else None,
+                "last_authenticated": user.last_authenticated.isoformat() + "Z" if user.last_authenticated else None
             },
-            "token": access_token,
-            "token_type": "bearer",
-            "confidence": confidence,
-            "emotion_data": json.loads(auth_log.emotion_data) if auth_log.emotion_data else None
+            "emotions": formatted_emotions,  # Required by frontend in specific format
+            "emotion_data": json.loads(auth_log.emotion_data) if auth_log.emotion_data else None  # Keep for backward compatibility
         }
     except Exception as e:
         logger.error(f"Authentication processing failed: {e}", exc_info=True)
+        auth_time = datetime.utcnow()
         return {
             "success": False,
+            "message": f"Authentication processing failed: {str(e)}",
             "error": f"Authentication processing failed: {str(e)}",
-            "authenticated_at": datetime.utcnow().isoformat()
+            "user_id": "",
+            "confidence": 0.0,
+            "threshold": 0.7,
+            "authenticated_at": auth_time.isoformat() + "Z",
+            "emotions": format_emotion_data(None)  # Default emotions
         }
 
 @router.post("/authenticate")

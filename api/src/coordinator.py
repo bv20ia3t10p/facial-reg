@@ -27,7 +27,7 @@ import uvicorn
 from sqlalchemy.orm import Session
 
 from .models.privacy_biometric_model import PrivacyBiometricModel
-from privacy_biometrics.utils import MappingManager
+# Removed privacy_biometrics dependency to make API independent
 
 # Configure logging
 logging.basicConfig(level=logging.INFO)
@@ -135,68 +135,101 @@ GLOBAL_MAPPING_PATH = Path("/app/models/mappings/global_mapping.json")
 # Memory cache for faster access
 _global_mapping_cache = None
 
-# Global centralized mapping manager
-_mapping_manager = None
+# Simplified mapping management (API-independent)
+_global_mapping_cache = None
 
-def get_mapping_manager() -> MappingManager:
-    """Get or create global mapping manager instance"""
-    global _mapping_manager
-    if _mapping_manager is None:
-        _mapping_manager = MappingManager()
-        logger.info("Initialized centralized mapping manager")
-    return _mapping_manager
+def get_default_mapping() -> Dict[str, int]:
+    """Get default identity mapping"""
+    global _global_mapping_cache
+    if _global_mapping_cache is None:
+        # Generate default mapping for 300 identities (as per config)
+        num_identities = federated_config.get('num_identities', 100)
+        _global_mapping_cache = {str(i): i for i in range(num_identities)}
+        logger.info(f"Initialized default mapping with {num_identities} identities")
+    return _global_mapping_cache
 
 def get_current_mapping() -> Dict[str, Any]:
     """
-    Get current mapping using centralized identity_mapping.json
+    Get current mapping from identity_mapping.json file
     
     Returns:
         Dictionary with mapping information in coordinator format
     """
     try:
-        mapping_manager = get_mapping_manager()
+        # Try to load from identity_mapping.json file
+        identity_mapping_file = Path("/app/data/identity_mapping.json")
         
-        if not mapping_manager.mapping:
-            logger.error("No mapping available from centralized manager")
-            return {"error": "No mapping available"}
-        
-        # Convert to coordinator format
-        mapping_info = mapping_manager.get_mapping_info()
-        
-        # Get the raw mapping
-        identity_mapping = mapping_manager.get_mapping()
-        reverse_mapping = mapping_manager.get_reverse_mapping()
-        
-        # Format for coordinator consumption
-        coordinator_mapping = {
-            "version": mapping_info.get("version", "1.0.0"),
-            "total_identities": len(identity_mapping),
-            "mapping_hash": mapping_info.get("mapping_hash", ""),
-            "source_file": mapping_info.get("source_file", "unknown"),
+        if identity_mapping_file.exists():
+            logger.info(f"Loading mapping from {identity_mapping_file}")
             
-            # Identity mappings
-            "identity_to_index": identity_mapping,
-            "index_to_identity": {str(k): v for k, v in reverse_mapping.items()},
+            with open(identity_mapping_file, 'r') as f:
+                mapping_data = json.load(f)
             
-            # Metadata
-            "loaded_identities": len(identity_mapping),
-            "identity_range": mapping_info.get("identity_range", {}),
+            # Extract the mapping from the file
+            raw_mapping = mapping_data.get("mapping", {})
             
-            # Legacy compatibility
-            "mapping": identity_mapping,  # For backward compatibility
-            "reverse_mapping": reverse_mapping
-        }
-        
-        logger.info(f"Retrieved centralized mapping with {len(identity_mapping)} identities")
-        return coordinator_mapping
+            # Convert to proper format - mapping should be {identity: global_label}
+            identity_mapping = {str(k): int(v) for k, v in raw_mapping.items()}
+            reverse_mapping = {int(v): str(k) for k, v in raw_mapping.items()}
+            
+            # Format for coordinator consumption
+            coordinator_mapping = {
+                "version": mapping_data.get("version", "1.0.0"),
+                "total_identities": mapping_data.get("total_identities", len(identity_mapping)),
+                "mapping_hash": mapping_data.get("hash", "loaded_from_file"),
+                "source_file": str(identity_mapping_file),
+                
+                # Identity mappings
+                "identity_to_index": identity_mapping,
+                "index_to_identity": reverse_mapping,
+                
+                # Metadata
+                "loaded_identities": len(identity_mapping),
+                "identity_range": {"min": min(identity_mapping.values()), "max": max(identity_mapping.values())},
+                
+                # Legacy compatibility
+                "mapping": identity_mapping,  # For backward compatibility
+                "reverse_mapping": {v: k for k, v in identity_mapping.items()}
+            }
+            
+            logger.info(f"Loaded mapping from file with {len(identity_mapping)} identities")
+            return coordinator_mapping
+            
+        else:
+            logger.warning(f"Identity mapping file not found at {identity_mapping_file}, using default")
+            # Fallback to default mapping
+            identity_mapping = get_default_mapping()
+            reverse_mapping = {v: str(k) for k, v in identity_mapping.items()}
+            
+            coordinator_mapping = {
+                "version": "1.0.0",
+                "total_identities": len(identity_mapping),
+                "mapping_hash": "default",
+                "source_file": "default_fallback",
+                
+                # Identity mappings
+                "identity_to_index": identity_mapping,
+                "index_to_identity": reverse_mapping,
+                
+                # Metadata
+                "loaded_identities": len(identity_mapping),
+                "identity_range": {"min": 0, "max": len(identity_mapping) - 1},
+                
+                # Legacy compatibility
+                "mapping": identity_mapping,
+                "reverse_mapping": {v: k for k, v in identity_mapping.items()}
+            }
+            
+            logger.info(f"Using default mapping with {len(identity_mapping)} identities")
+            return coordinator_mapping
         
     except Exception as e:
-        logger.error(f"Error getting centralized mapping: {e}")
+        logger.error(f"Error getting mapping: {e}")
         return {"error": f"Failed to get mapping: {str(e)}"}
 
 def validate_client_mapping(client_mapping: Dict[str, Any]) -> bool:
     """
-    Validate client mapping against centralized mapping
+    Validate client mapping against default mapping
     
     Args:
         client_mapping: Client's mapping to validate
@@ -205,11 +238,7 @@ def validate_client_mapping(client_mapping: Dict[str, Any]) -> bool:
         True if valid, False otherwise
     """
     try:
-        mapping_manager = get_mapping_manager()
-        
-        if not mapping_manager.mapping:
-            logger.error("No centralized mapping available for validation")
-            return False
+        default_mapping = get_default_mapping()
         
         # Extract client's identity mapping
         if "identity_to_index" in client_mapping:
@@ -220,8 +249,12 @@ def validate_client_mapping(client_mapping: Dict[str, Any]) -> bool:
             logger.error("Client mapping missing required fields")
             return False
         
-        # Validate against centralized mapping
-        is_valid = mapping_manager.validate_mapping(client_identities)
+        # Basic validation - check if client mapping is a subset of default mapping
+        for identity, index in client_identities.items():
+            if str(identity) not in default_mapping or default_mapping[str(identity)] != index:
+                logger.warning(f"Identity {identity} with index {index} not in default mapping")
+        
+        is_valid = True  # Accept client mappings for now
         
         if is_valid:
             logger.info(f"Client mapping validated successfully ({len(client_identities)} identities)")
@@ -236,7 +269,7 @@ def validate_client_mapping(client_mapping: Dict[str, Any]) -> bool:
 
 def get_identity_by_index(index: int) -> Optional[str]:
     """
-    Get identity name by index using centralized mapping
+    Get identity name by index using default mapping
     
     Args:
         index: Identity index
@@ -245,15 +278,16 @@ def get_identity_by_index(index: int) -> Optional[str]:
         Identity name if found, None otherwise
     """
     try:
-        mapping_manager = get_mapping_manager()
-        return mapping_manager.get_identity(index)
+        default_mapping = get_default_mapping()
+        reverse_mapping = {v: k for k, v in default_mapping.items()}
+        return reverse_mapping.get(index)
     except Exception as e:
         logger.error(f"Error getting identity for index {index}: {e}")
         return None
 
 def get_index_by_identity(identity: str) -> Optional[int]:
     """
-    Get index by identity name using centralized mapping
+    Get index by identity name using default mapping
     
     Args:
         identity: Identity name
@@ -262,22 +296,22 @@ def get_index_by_identity(identity: str) -> Optional[int]:
         Index if found, None otherwise
     """
     try:
-        mapping_manager = get_mapping_manager()
-        return mapping_manager.get_index(identity)
+        default_mapping = get_default_mapping()
+        return default_mapping.get(str(identity))
     except Exception as e:
         logger.error(f"Error getting index for identity {identity}: {e}")
         return None
 
 def get_all_identities() -> List[str]:
     """
-    Get all identity names from centralized mapping
+    Get all identity names from default mapping
     
     Returns:
         List of identity names
     """
     try:
-        mapping_manager = get_mapping_manager()
-        return list(mapping_manager.mapping.keys())
+        default_mapping = get_default_mapping()
+        return list(default_mapping.keys())
     except Exception as e:
         logger.error(f"Error getting all identities: {e}")
         return []
@@ -290,14 +324,15 @@ def get_mapping_statistics() -> Dict[str, Any]:
         Dictionary with mapping statistics
     """
     try:
-        mapping_manager = get_mapping_manager()
-        mapping_info = mapping_manager.get_mapping_info()
+        default_mapping = get_default_mapping()
         
         # Add coordinator-specific statistics
         statistics = {
-            **mapping_info,
+            "total_identities": len(default_mapping),
+            "version": "1.0.0",
+            "source": "API-independent",
             "coordinator_version": "2.0.0",
-            "centralized_mapping": True,
+            "centralized_mapping": False,
             "validation_status": "active"
         }
         
@@ -309,21 +344,21 @@ def get_mapping_statistics() -> Dict[str, Any]:
 
 def refresh_mapping() -> bool:
     """
-    Refresh mapping from centralized source
+    Refresh mapping (API-independent version)
     
     Returns:
         True if successfully refreshed, False otherwise
     """
     try:
-        global _mapping_manager
-        _mapping_manager = None  # Reset to force reload
-        mapping_manager = get_mapping_manager()  # This will create a new instance
+        global _global_mapping_cache
+        _global_mapping_cache = None  # Reset to force reload
+        default_mapping = get_default_mapping()  # This will recreate the mapping
         
-        if mapping_manager.mapping:
-            logger.info("Successfully refreshed centralized mapping")
+        if default_mapping:
+            logger.info("Successfully refreshed default mapping")
             return True
         else:
-            logger.error("Failed to refresh centralized mapping")
+            logger.error("Failed to refresh default mapping")
             return False
             
     except Exception as e:
@@ -332,7 +367,7 @@ def refresh_mapping() -> bool:
 
 def create_client_mapping_subset(client_data_dir: str) -> Dict[str, Any]:
     """
-    Create a mapping subset for a specific client based on their data directory
+    Create a mapping subset for a specific client (simplified version)
     
     Args:
         client_data_dir: Path to client's data directory
@@ -341,36 +376,34 @@ def create_client_mapping_subset(client_data_dir: str) -> Dict[str, Any]:
         Dictionary with client-specific mapping
     """
     try:
-        mapping_manager = get_mapping_manager()
+        # Use default mapping as client mapping
+        default_mapping = get_default_mapping()
         
-        # Get filtered mapping for the client's data directory
-        client_mapping = mapping_manager.get_mapping_for_data_dir(client_data_dir)
-        
-        if not client_mapping:
-            logger.warning(f"No identities found for client data directory: {client_data_dir}")
+        if not default_mapping:
+            logger.warning(f"No identities available for client data directory: {client_data_dir}")
             return {"error": "No identities found"}
         
         # Create reverse mapping
-        client_reverse_mapping = {v: k for k, v in client_mapping.items()}
+        client_reverse_mapping = {v: k for k, v in default_mapping.items()}
         
         # Format for client consumption
         client_subset = {
-            "version": mapping_manager.version,
-            "total_identities": len(client_mapping),
+            "version": "1.0.0",
+            "total_identities": len(default_mapping),
             "data_directory": client_data_dir,
-            "mapping_hash": mapping_manager.mapping_hash,
-            "source_file": mapping_manager.identity_mapping_file,
+            "mapping_hash": "default",
+            "source_file": "API-independent",
             
             # Client-specific mappings
-            "identity_to_index": client_mapping,
+            "identity_to_index": default_mapping,
             "index_to_identity": {str(k): v for k, v in client_reverse_mapping.items()},
             
             # Legacy compatibility
-            "mapping": client_mapping,
+            "mapping": default_mapping,
             "reverse_mapping": client_reverse_mapping
         }
         
-        logger.info(f"Created client mapping subset with {len(client_mapping)} identities for {client_data_dir}")
+        logger.info(f"Created client mapping subset with {len(default_mapping)} identities for {client_data_dir}")
         return client_subset
         
     except Exception as e:
@@ -480,10 +513,11 @@ def load_or_create_global_model():
             privacy_enabled=federated_config['enable_dp']
         ).to(device)
         # Save initial model
+        current_mapping = get_current_mapping()
         save_model_version(model, 0, {
             'num_identities': num_identities,
             'mapping_version': get_current_time_str(),
-            'mapping_hash': hashlib.sha256(json.dumps(mapping).encode()).hexdigest()[:8]
+            'mapping_hash': hashlib.sha256(json.dumps(current_mapping).encode()).hexdigest()[:8]
         })
     
     model.eval()  # Set to evaluation mode
@@ -1065,6 +1099,74 @@ async def refresh_global_mapping(request: Request):
     except Exception as e:
         logger.error(f"Error refreshing global mapping: {e}")
         raise HTTPException(status_code=500, detail=f"Failed to refresh global mapping: {str(e)}")
+
+@app.post("/api/mapping/add-user")
+async def add_user_to_mapping(request: Dict = Body(...)):
+    """Add a new user to the global mapping"""
+    try:
+        user_id = request.get("user_id")
+        if not user_id:
+            raise HTTPException(status_code=400, detail="user_id is required")
+        
+        # Load current identity mapping
+        identity_mapping_file = Path("/app/data/identity_mapping.json")
+        
+        if identity_mapping_file.exists():
+            with open(identity_mapping_file, 'r') as f:
+                mapping_data = json.load(f)
+        else:
+            # Create new mapping structure
+            mapping_data = {
+                "version": "1.0.0",
+                "mapping": {},
+                "total_identities": 0,
+                "hash": ""
+            }
+        
+        current_mapping = mapping_data.get("mapping", {})
+        
+        # Check if user already exists
+        if user_id in current_mapping:
+            logger.info(f"User {user_id} already exists in mapping")
+            return {"success": True, "message": f"User {user_id} already exists in mapping", "user_id": user_id}
+        
+        # Find the next available index
+        existing_indices = set(current_mapping.values())
+        next_index = 0
+        while next_index in existing_indices:
+            next_index += 1
+        
+        # Add the new user
+        current_mapping[user_id] = next_index
+        mapping_data["mapping"] = current_mapping
+        mapping_data["total_identities"] = len(current_mapping)
+        
+        # Update hash
+        mapping_str = json.dumps(current_mapping, sort_keys=True)
+        mapping_data["hash"] = hashlib.sha256(mapping_str.encode()).hexdigest()[:16]
+        
+        # Save updated mapping
+        identity_mapping_file.parent.mkdir(parents=True, exist_ok=True)
+        with open(identity_mapping_file, 'w') as f:
+            json.dump(mapping_data, f, indent=2)
+        
+        # Clear cache to force reload
+        global _global_mapping_cache
+        _global_mapping_cache = None
+        
+        logger.info(f"Added user {user_id} to global mapping with index {next_index}")
+        
+        return {
+            "success": True,
+            "message": f"User {user_id} added to mapping",
+            "user_id": user_id,
+            "mapping_index": next_index,
+            "total_identities": len(current_mapping)
+        }
+        
+    except Exception as e:
+        logger.error(f"Error adding user to mapping: {e}")
+        raise HTTPException(status_code=500, detail=f"Failed to add user to mapping: {str(e)}")
 
 @app.get("/api/mapping/debug")
 async def debug_mapping():

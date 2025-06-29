@@ -51,18 +51,21 @@ class BiometricService(BiometricUtilsMixin):
             self.model_loader = BiometricModelLoader(self.client_id, self.device)
             self.model = self.model_loader.load_model()
             
-            # Initialize mapping service
+            # Initialize mapping service and set up filtered mapping for client
             self.mapping_service = MappingService()
+            # Initialize the filtered mapping for this specific client
+            self.mapping_service.get_filtered_mapping_for_client(self.client_id)
             
             # Initialize feature extractor
             self.feature_extractor = FeatureExtractor(self.model, self.device)
             
-            # Initialize identity predictor
+            # Initialize identity predictor with client_id for filtered mapping
             self.identity_predictor = IdentityPredictor(
                 self.model, 
                 self.mapping_service,
                 self.feature_extractor,
-                self.device
+                self.device,
+                client_id=self.client_id
             )
             
             # Initialize transforms
@@ -465,7 +468,7 @@ class BiometricService(BiometricUtilsMixin):
                 results = []
                 for i, (conf, idx) in enumerate(zip(top_confidences, top_indices)):
                     class_idx = idx.item()
-                    user_id = self.mapping_service.get_identity_by_index(class_idx)
+                    user_id = self.mapping_service.get_identity_by_model_class(class_idx, use_filtered=True)
                     results.append({
                         "rank": i+1,
                         "class_index": class_idx,

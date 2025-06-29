@@ -20,10 +20,12 @@ logger = logging.getLogger(__name__)
 class IdentityPredictionService:
     def __init__(self, model_path: str, client_id: str = None):
         self.model_path = Path(model_path)
-        self.client_id = client_id
+        self.client_id = client_id or "client1"  # Default to client1
         self.model = None
         self.mapping_service = MappingService()
         self.mapping_service.initialize_mapping()
+        # Initialize filtered mapping for the client
+        self.mapping_service.get_filtered_mapping_for_client(self.client_id)
         self.initialize_model()
     
     def initialize_model(self):
@@ -97,8 +99,8 @@ class IdentityPredictionService:
                     
                 idx = int(top_indices[0, i])
                 try:
-                    # Get original class ID
-                    class_id = self.mapping_service.get_identity_by_index(idx)
+                    # Get original class ID using filtered mapping
+                    class_id = self.mapping_service.get_identity_by_model_class(idx, use_filtered=True)
                     predictions.append({
                         'predicted_id': class_id,
                         'confidence': prob,
@@ -133,9 +135,9 @@ class IdentityPredictionService:
             if self.model is None:
                 raise ValueError("Model not initialized")
             
-            # Get model index for claimed ID
+            # Get model index for claimed ID using filtered mapping
             try:
-                target_idx = self.mapping_service.get_index_by_identity(claimed_id)
+                target_idx = self.mapping_service.get_model_class_by_identity(claimed_id, use_filtered=True)
             except Exception as e:
                 logger.error(f"Error getting model index for ID {claimed_id}: {e}")
                 return False, 0.0
@@ -159,7 +161,7 @@ class IdentityPredictionService:
             if not is_match:
                 top_prob, top_idx = torch.max(probs, dim=1)
                 try:
-                    top_id = self.mapping_service.get_identity_by_index(int(top_idx))
+                    top_id = self.mapping_service.get_identity_by_model_class(int(top_idx), use_filtered=True)
                     logger.warning(f"  Top prediction was ID {top_id} with confidence {float(top_prob):.4f}")
                 except Exception as e:
                     logger.error(f"Error getting class ID for index {top_idx}: {e}")
@@ -173,7 +175,7 @@ class IdentityPredictionService:
 class IdentityPredictor:
     """Handles user identity prediction and verification"""
     
-    def __init__(self, model: nn.Module, mapping_service, feature_extractor, device: torch.device):
+    def __init__(self, model: nn.Module, mapping_service, feature_extractor, device: torch.device, client_id: str = "client1"):
         """
         Initialize identity predictor
         
@@ -182,11 +184,13 @@ class IdentityPredictor:
             mapping_service: Service to map class indices to user IDs
             feature_extractor: Feature extraction component
             device: Torch device for computations
+            client_id: Client identifier for filtered mapping
         """
         self.model = model
         self.mapping_service = mapping_service
         self.feature_extractor = feature_extractor
         self.device = device
+        self.client_id = client_id
         
         # Get the feature dimension from the model
         self.feature_dim = getattr(model, 'embedding_dim', 512)
@@ -199,17 +203,18 @@ class IdentityPredictor:
         # Load initial mapping
         self._refresh_mapping_cache()
         
-        logger.info(f"Identity predictor initialized with feature_dim={self.feature_dim}, backbone_output_dim={self.backbone_output_dim}")
+        logger.info(f"Identity predictor initialized with feature_dim={self.feature_dim}, backbone_output_dim={self.backbone_output_dim}, client_id={self.client_id}")
     
     def _refresh_mapping_cache(self):
-        """Refresh the mapping cache"""
+        """Refresh the mapping cache with filtered mapping for federated models"""
         try:
             self.mapping_service.initialize_mapping()
-            self.mapping_cache = self.mapping_service.get_mapping()
+            # Create filtered mapping that matches training logic
+            self.mapping_cache = self.mapping_service.get_filtered_mapping_for_client(self.client_id)
             self.mapping_version = datetime.now()
-            logger.info(f"Mapping cache refreshed with {len(self.mapping_cache)} entries")
+            logger.info(f"Filtered mapping cache refreshed with {len(self.mapping_cache)} entries for {self.client_id}")
         except Exception as e:
-            logger.error(f"Failed to refresh mapping cache: {e}")
+            logger.error(f"Failed to refresh filtered mapping cache: {e}")
     
     def identify_user(self, image_tensor: torch.Tensor) -> Tuple[str, float, List[float]]:
         """
@@ -234,8 +239,8 @@ class IdentityPredictor:
                 confidence, predicted_idx = torch.max(probabilities, 0)
                 class_index = predicted_idx.item()
                 
-                # Map class index to user ID
-                user_id = self.mapping_service.get_identity_by_index(class_index)
+                # Map class index to user ID using filtered mapping
+                user_id = self.mapping_service.get_identity_by_model_class(class_index, use_filtered=True)
                 
                 # Convert features to list
                 feature_list = features[0].cpu().numpy().tolist()
@@ -266,8 +271,8 @@ class IdentityPredictor:
                 confidence, predicted_idx = torch.max(probabilities, 0)
                 class_index = predicted_idx.item()
                 
-                # Map class index to user ID
-                user_id = self.mapping_service.get_identity_by_index(class_index)
+                # Map class index to user ID using filtered mapping
+                user_id = self.mapping_service.get_identity_by_model_class(class_index, use_filtered=True)
                 
                 # Convert features to list
                 feature_list = features[0].cpu().numpy().tolist()
@@ -326,7 +331,7 @@ class IdentityPredictor:
                 results = []
                 for i, (conf, idx) in enumerate(zip(top_confidences, top_indices)):
                     class_idx = idx.item()
-                    user_id = self.mapping_service.get_identity_by_index(class_idx)
+                    user_id = self.mapping_service.get_identity_by_model_class(class_idx, use_filtered=True)
                     
                     results.append({
                         "rank": i+1,

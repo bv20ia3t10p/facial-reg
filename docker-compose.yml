@@ -16,7 +16,7 @@ services:
       - ./cache:/app/cache
       - ./logs:/app/logs
       - ./database:/app/database
-      - ./privacy_biometrics:/app/privacy_biometrics
+      # privacy_biometrics removed - API is now independent
       - pip-cache:/root/.cache/pip
     environment:
       - PYTHONPATH=/app
@@ -34,7 +34,7 @@ services:
       - DP_NOISE_MULTIPLIER=0.2
       - DP_MAX_GRAD_NORM=5.0
       - IS_SERVER=true
-      - NUM_IDENTITIES=300
+      - NUM_IDENTITIES=100
     command: uvicorn api.src.coordinator:app --host 0.0.0.0 --reload
     restart: unless-stopped
     networks:
@@ -54,7 +54,7 @@ services:
       - ./models:/app/models
       - ./cache:/app/cache
       - ./logs:/app/logs
-      - ./privacy_biometrics:/app/privacy_biometrics
+      # privacy_biometrics removed - API is now independent
       - ./database/client1.db:/app/database/facial_reg.db
       - pip-cache:/root/.cache/pip
     environment:
@@ -112,7 +112,7 @@ services:
       - ./models:/app/models
       - ./cache:/app/cache
       - ./logs:/app/logs
-      - ./privacy_biometrics:/app/privacy_biometrics
+      # privacy_biometrics removed - API is now independent
       - ./database/client2.db:/app/database/facial_reg.db
       - pip-cache:/root/.cache/pip
     environment:

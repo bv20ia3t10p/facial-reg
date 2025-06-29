@@ -6,6 +6,9 @@ import io
 import json
 import logging
 import time
+import uuid
+import hashlib
+import numpy as np
 from datetime import datetime
 from pathlib import Path
 from typing import List, Optional
@@ -47,6 +50,203 @@ router = APIRouter()
 # Global variable to track if model is being trained
 model_training_in_progress = False
 
+def add_user_to_identity_mapping(user_id: str) -> bool:
+    """
+    Add a new user to the global identity mapping
+    
+    Args:
+        user_id: The new user's ID to add
+        
+    Returns:
+        True if successfully added, False otherwise
+    """
+    try:
+        # Load current identity mapping
+        mapping_path = Path("/app/data/identity_mapping.json")
+        if not mapping_path.exists():
+            # Try alternative paths
+            alternative_paths = [
+                Path("./data/identity_mapping.json"),
+                Path("../data/identity_mapping.json"),
+                Path("/app/models/identity_mapping.json")
+            ]
+            for alt_path in alternative_paths:
+                if alt_path.exists():
+                    mapping_path = alt_path
+                    break
+            else:
+                logger.error("Could not find identity_mapping.json")
+                return False
+        
+        with open(mapping_path, 'r') as f:
+            mapping_data = json.load(f)
+        
+        current_mapping = mapping_data.get("mapping", {})
+        
+        # Check if user already exists
+        if user_id in current_mapping:
+            logger.info(f"User {user_id} already exists in mapping")
+            return True
+        
+        # Find the next available index
+        existing_indices = set(current_mapping.values())
+        next_index = 0
+        while next_index in existing_indices:
+            next_index += 1
+        
+        # Add the new user
+        current_mapping[user_id] = next_index
+        mapping_data["mapping"] = current_mapping
+        mapping_data["total_identities"] = len(current_mapping)
+        
+        # Update hash
+        mapping_str = json.dumps(current_mapping, sort_keys=True)
+        mapping_data["hash"] = hashlib.sha256(mapping_str.encode()).hexdigest()[:16]
+        
+        # Save updated mapping
+        with open(mapping_path, 'w') as f:
+            json.dump(mapping_data, f, indent=2)
+        
+        logger.info(f"Added user {user_id} to identity mapping with index {next_index}")
+        return True
+        
+    except Exception as e:
+        logger.error(f"Failed to add user to identity mapping: {e}")
+        return False
+
+def create_user_data_directory(user_id: str, images: List[UploadFile]) -> bool:
+    """
+    Create data directory for new user and save images
+    
+    Args:
+        user_id: The user's ID
+        images: List of uploaded images
+        
+    Returns:
+        True if successfully created, False otherwise
+    """
+    try:
+        # Create user directory in client1 partition
+        user_data_dir = Path(f"/app/data/partitioned/client1/{user_id}")
+        user_data_dir.mkdir(parents=True, exist_ok=True)
+        
+        # Save images with proper naming
+        for i, image_file in enumerate(images):
+            try:
+                # Read image data
+                image_data = image_file.file.read()
+                image_file.file.seek(0)  # Reset file pointer
+                
+                # Validate image
+                img = Image.open(io.BytesIO(image_data))
+                if img.mode != 'RGB':
+                    img = img.convert('RGB')
+                
+                # Save image with incrementing filename
+                image_path = user_data_dir / f"user_image_{i:03d}.jpg"
+                img.save(image_path, 'JPEG', quality=95)
+                
+                logger.info(f"Saved image {i} for user {user_id} at {image_path}")
+                
+            except Exception as e:
+                logger.error(f"Error processing image {i} for user {user_id}: {e}")
+                continue
+        
+        logger.info(f"Created data directory for user {user_id} with {len(images)} images")
+        return True
+        
+    except Exception as e:
+        logger.error(f"Failed to create user data directory: {e}")
+        return False
+
+def process_user_images_for_database(images: List[UploadFile]) -> Optional[bytes]:
+    """
+    Process uploaded images and create face encoding for database storage
+    
+    Args:
+        images: List of uploaded images
+        
+    Returns:
+        Face encoding as bytes or None if processing failed
+    """
+    try:
+        if not biometric_service or not biometric_service.initialized:
+            logger.error("Biometric service not initialized")
+            return None
+        
+        # Process the first valid image for face encoding
+        for i, image_file in enumerate(images):
+            try:
+                # Read image data
+                image_data = image_file.file.read()
+                image_file.file.seek(0)  # Reset file pointer
+                
+                # Validate image
+                img = Image.open(io.BytesIO(image_data))
+                if img.mode != 'RGB':
+                    img = img.convert('RGB')
+                
+                # Convert back to bytes for biometric service
+                img_bytes = io.BytesIO()
+                img.save(img_bytes, format='JPEG')
+                img_bytes = img_bytes.getvalue()
+                
+                # Use biometric service to extract features
+                image_tensor = biometric_service.preprocess_image(img_bytes)
+                features = biometric_service.feature_extractor.extract_features(image_tensor)
+                
+                # Convert features to bytes for database storage
+                features_np = features.cpu().numpy().astype(np.float32)
+                face_encoding = features_np.tobytes()
+                
+                logger.info(f"Successfully processed image {i} for face encoding")
+                return face_encoding
+                
+            except Exception as e:
+                logger.error(f"Error processing image {i} for face encoding: {e}")
+                continue
+        
+        logger.error("Failed to process any images for face encoding")
+        return None
+        
+    except Exception as e:
+        logger.error(f"Failed to process user images: {e}")
+        return None
+
+def notify_coordinator_new_user(user_id: str) -> bool:
+    """
+    Notify the coordinator about a new user for mapping updates
+    
+    Args:
+        user_id: The new user's ID
+        
+    Returns:
+        True if successfully notified, False otherwise
+    """
+    try:
+        import requests
+        import os
+        
+        coordinator_url = os.getenv("SERVER_URL", "http://fl-coordinator:8000")
+        
+        # Try to notify coordinator about new user
+        response = requests.post(
+            f"{coordinator_url}/api/mapping/add-user",
+            json={"user_id": user_id},
+            timeout=10
+        )
+        
+        if response.status_code == 200:
+            logger.info(f"Successfully notified coordinator about new user {user_id}")
+            return True
+        else:
+            logger.warning(f"Coordinator returned status {response.status_code} for new user {user_id}")
+            return False
+            
+    except Exception as e:
+        logger.warning(f"Could not notify coordinator about new user {user_id}: {e}")
+        return False
+
 # Function to train the model in the background
 def train_model_task(db: Session = None):
     global model_training_in_progress
@@ -58,226 +258,52 @@ def train_model_task(db: Session = None):
             return
         
         model_training_in_progress = True
-        logger.info("Starting model training in background...")
+        logger.info("Starting federated model update in background...")
         
-        # Get a new database session if none was provided
-        close_db = False
-        if db is None:
-            from ..db.database import SessionLocal
-            db = SessionLocal()
-            close_db = True
-        
+        # Import federated training components
         try:
-            # Initialize mapping service
-            from ..services.mapping_service import MappingService
-            mapping_service = MappingService()
-            
-            # Get current global mapping
-            global_mapping = mapping_service.fetch_mapping(force_refresh=True)
-            if not global_mapping:
-                logger.warning("No global mapping available, will create new mapping")
-            
-            # 1. Load all user face encodings from the database
-            logger.info("Loading user face encodings from database...")
-            users = db.execute(text("""
-                SELECT id, face_encoding FROM users
-                WHERE face_encoding IS NOT NULL
-                ORDER BY id
-            """)).fetchall()
-            
-            if not users or len(users) == 0:
-                logger.warning("No users with face encodings found in database")
-                return
-                
-            logger.info(f"Loaded face encodings for {len(users)} users")
-            
-            # 2. Train or update the model
-            import torch
-            import torch.nn as nn
-            import torch.optim as optim
-            import numpy as np
+            import subprocess
             import os
             
-            # Create models directory if it doesn't exist
-            models_dir = Path("/app/models")
-            models_dir.mkdir(exist_ok=True)
+            # Run federated training script
+            script_path = "/app/train_federated.py"
+            if not Path(script_path).exists():
+                script_path = "/app/api/train_federated.py"
+            if not Path(script_path).exists():
+                script_path = "./train_federated.py"
             
-            # Prepare data - we need to extract features from raw face encodings
-            user_features = []
-            user_ids = []
-            
-            # Create a simple feature extractor to convert stored face encodings to feature vectors
-            feature_extractor = face_recognizer.model
-            feature_extractor.eval()
-            
-            # Determine the feature dimension from the first encoding
-            feature_dim = None
-            
-            # Track user ID to class index mapping
-            user_to_class_idx = {}
-            next_class_idx = 0
-            
-            # If we have a global mapping, use it to maintain consistent indices
-            if global_mapping:
-                # Invert the mapping to get user_id -> class_idx
-                for class_idx, user_id in global_mapping.items():
-                    user_to_class_idx[user_id] = int(class_idx)
-                next_class_idx = max(int(idx) for idx in global_mapping.keys()) + 1
-            
-            for i, user in enumerate(users):
-                try:
-                    # Load face encoding from database (this is already preprocessed)
-                    face_encoding_bytes = user.face_encoding
-                    
-                    # Convert bytes to numpy array
-                    face_encoding = np.frombuffer(face_encoding_bytes, dtype=np.float32)
-                    
-                    # If this is the first encoding, determine the feature dimension
-                    if feature_dim is None:
-                        feature_dim = face_encoding.shape[0]
-                        logger.info(f"Detected feature dimension: {feature_dim}")
-                    
-                    # Reshape to match expected dimensions
-                    face_encoding = face_encoding.reshape(1, -1)
-                    
-                    # Convert to torch tensor
-                    face_tensor = torch.from_numpy(face_encoding).float()
-                    
-                    # Get or assign class index for this user
-                    if user.id not in user_to_class_idx:
-                        user_to_class_idx[user.id] = next_class_idx
-                        next_class_idx += 1
-                    
-                    # Add to features list
-                    user_features.append(face_tensor)
-                    user_ids.append(user.id)
-                    
-                    logger.debug(f"Processed face encoding for user {user.id}, class_idx={user_to_class_idx[user.id]}")
-                except Exception as e:
-                    logger.error(f"Error processing face encoding for user {user.id}: {e}")
-            
-            if not user_features:
-                logger.error("No valid face encodings found")
-                return
+            if Path(script_path).exists():
+                logger.info(f"Running federated training script: {script_path}")
+                result = subprocess.run(
+                    ["python", script_path],
+                    capture_output=True,
+                    text=True,
+                    timeout=1800  # 30 minutes timeout
+                )
                 
-            # Stack features into a single tensor
-            features_tensor = torch.cat(user_features, dim=0)
-            
-            # Create labels tensor using the mapping
-            labels = [user_to_class_idx[uid] for uid in user_ids]
-            labels_tensor = torch.tensor(labels, dtype=torch.long)
-            
-            logger.info(f"Prepared training data: {features_tensor.shape} features, {labels_tensor.shape} labels")
-            
-            # Create a simple dataset and dataloader
-            from torch.utils.data import TensorDataset, DataLoader
-            dataset = TensorDataset(features_tensor, labels_tensor)
-            dataloader = DataLoader(dataset, batch_size=4, shuffle=True)
-            
-            # Initialize model with the correct number of identities
-            num_identities = next_class_idx  # Use the next available index as the total count
-            
-            # Create a model with the correct feature dimension from the start
-            logger.info(f"Creating model with {num_identities} identities and feature_dim={feature_dim}")
-            model = PrivacyBiometricModel(
-                num_identities=num_identities, 
-                embedding_dim=feature_dim,
-                privacy_enabled=True
-            )
-            
-            # Setup optimizer and loss function
-            optimizer = torch.optim.Adam(model.parameters(), lr=0.001)
-            criterion = torch.nn.CrossEntropyLoss()
-            
-            # Training for 20 epochs
-            logger.info("Beginning training for 20 epochs...")
-            for epoch in range(1, 21):
-                epoch_loss = 0.0
-                correct = 0
-                total = 0
-                
-                for batch_features, batch_labels in dataloader:
-                    optimizer.zero_grad()
-                    
-                    # Forward pass with the biometric model
-                    identity_logits, _ = model(batch_features)
-                    
-                    # Calculate loss
-                    loss = criterion(identity_logits, batch_labels)
-                    
-                    # Backward pass and optimize
-                    loss.backward()
-                    optimizer.step()
-                    
-                    # Track statistics
-                    epoch_loss += loss.item()
-                    _, predicted = torch.max(identity_logits, 1)
-                    total += batch_labels.size(0)
-                    correct += (predicted == batch_labels).sum().item()
-                
-                # Log epoch progress
-                logger.info(f"Epoch {epoch}: Loss={epoch_loss/len(dataloader):.4f}, Accuracy={correct/total*100:.2f}%")
-            
-            logger.info("Training completed, saving model...")
-            
-            # Create mapping from class indices to user IDs
-            idx_to_user = {str(class_idx): user_id for user_id, class_idx in user_to_class_idx.items()}
-            
-            # Update global mapping
-            if mapping_service.update_mapping(idx_to_user):
-                logger.info("Successfully updated global mapping")
+                if result.returncode == 0:
+                    logger.info("Federated training completed successfully")
+                else:
+                    logger.error(f"Federated training failed: {result.stderr}")
             else:
-                logger.warning("Failed to update global mapping")
-            
-            # Save the model with metadata
-            client_id = os.getenv("CLIENT_ID", "client1")
-            model_metadata = {
-                'state_dict': model.state_dict(),
-                'num_identities': num_identities,
-                'feature_dim': feature_dim,
-                'privacy_enabled': True,
-                'client_id': client_id,
-                'timestamp': datetime.utcnow().isoformat(),
-                'mapping_version': mapping_service.mapping_version,
-                'mapping_hash': mapping_service.mapping_hash
-            }
-            torch.save(model_metadata, models_dir / f"best_{client_id}_pretrained_model.pth")
-            
-            logger.info(f"Model saved as best_{client_id}_pretrained_model.pth")
-            
-            # Request model reload
-            asyncio.create_task(reload_model())
-            
-            logger.info("Model training task completed successfully")
-            
-        except Exception as e:
-            logger.error(f"Error during model training: {e}")
-        finally:
-            if close_db:
-                db.close()
+                logger.warning("Federated training script not found, skipping training")
+                
+        except Exception as training_error:
+            logger.error(f"Error during federated training: {training_error}")
+        
+        # Reload models after training
+        try:
+            if biometric_service:
+                biometric_service.reload_model()
+                logger.info("Biometric service model reloaded after training")
+        except Exception as reload_error:
+            logger.error(f"Error reloading model after training: {reload_error}")
             
     except Exception as e:
-        logger.error(f"Failed to train model: {e}")
+        logger.error(f"Error in training task: {e}")
     finally:
         model_training_in_progress = False
-
-async def reload_model():
-    """Reload the model after training"""
-    try:
-        logger.info("Reloading model...")
-        
-        # Reload in BiometricService through service_init
-        from ..services.service_init import reload_biometric_service
-        if reload_biometric_service:
-            success = reload_biometric_service()
-            if success:
-                logger.info("Reloaded model through service_init")
-            else:
-                logger.warning("Model reload through service_init returned False")
-        
-        logger.info("Model reload completed")
-    except Exception as e:
-        logger.error(f"Failed to reload model: {e}")
+        logger.info("Training task completed")
 
 @router.get("/{user_id}")
 async def get_user_info(user_id: str, db: Session = Depends(get_db)):
@@ -459,57 +485,51 @@ async def register_user(
                 detail=f"User with email {email} already exists"
             )
         
-        # Process face images
+        # Validate face images
         if not images or len(images) == 0:
             raise HTTPException(
                 status_code=400,
                 detail="At least one face image is required"
             )
         
-        # Generate a user ID greater than any existing ID
-        user_id = generate_uuid()
-        logger.info(f"Generated user ID '{user_id}' for new user registration")
-        user_data_dir = Path(f"/app/data/{user_id}")
-        user_data_dir.mkdir(parents=True, exist_ok=True)
+        # Generate a unique user ID
+        user_id = str(uuid.uuid4())[:8]  # Use shorter UUID for user ID
         
-        # Process and save face images
-        face_features = None
-        for i, image_file in enumerate(images):
-            try:
-                # Read image data
-                image_data = await image_file.read()
-                
-                # Save image to user directory
-                image_path = user_data_dir / f"face_{i}.jpg"
-                with open(image_path, "wb") as f:
-                    f.write(image_data)
-                
-                # Process image for face recognition
-                image = Image.open(io.BytesIO(image_data))
-                aligned_face = face_recognizer.align_face(image)
-                
-                # Extract face features
-                tensor = face_recognizer.preprocess_image(aligned_face)
-                features = face_recognizer.extract_features(tensor)
-                
-                # Use the first image's features for the user record
-                if face_features is None:
-                    face_features = face_recognizer.save_features(features)
-            
-            except Exception as e:
-                logger.error(f"Error processing image {i}: {e}")
-                continue
+        # Ensure the user ID is unique
+        while True:
+            existing_id = db.execute(
+                text("SELECT id FROM users WHERE id = :id"),
+                {"id": user_id}
+            ).fetchone()
+            if not existing_id:
+                break
+            user_id = str(uuid.uuid4())[:8]
         
+        logger.info(f"Generated unique user ID '{user_id}' for new user registration")
+        
+        # Process face images for database storage
+        face_features = process_user_images_for_database(images)
         if face_features is None:
             raise HTTPException(
                 status_code=400,
                 detail="Failed to process face images. Please ensure images contain clear faces."
             )
         
-        # Always use "demo" as password
+        # Create user data directory and save images
+        if not create_user_data_directory(user_id, images):
+            raise HTTPException(
+                status_code=500,
+                detail="Failed to create user data directory"
+            )
+        
+        # Add user to identity mapping
+        if not add_user_to_identity_mapping(user_id):
+            logger.warning(f"Failed to add user {user_id} to identity mapping, but continuing...")
+        
+        # Use "demo" as default password
         user_password = "demo"
         
-        # Create user record
+        # Create user record in database
         password_hash = get_password_hash(user_password)
         user_data = {
             "id": user_id,
@@ -529,9 +549,13 @@ async def register_user(
                 detail="Failed to create user record"
             )
         
-        # Automatically trigger model training in the background
-        # This won't block the API response
+        # Notify coordinator about new user
+        notify_coordinator_new_user(user_id)
+        
+        # Trigger federated training in the background
         background_tasks.add_task(train_model_task)
+        
+        logger.info(f"Successfully registered new user {user_id} ({name})")
         
         return {
             "success": True,
@@ -551,7 +575,7 @@ async def register_user(
         raise HTTPException(
             status_code=500,
             detail=f"Failed to register user: {str(e)}"
-        ) 
+        )
 
 @router.post("/reload-model")
 async def reload_model_endpoint(

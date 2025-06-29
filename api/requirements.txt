@@ -1,3 +1,8 @@
+# Core PyTorch and Computer Vision (ESSENTIAL for biometric service)
+torch>=2.1.1
+torchvision>=0.16.1
+opencv-python-headless==4.8.1.78
+
 # API Framework
 fastapi==0.104.1
 uvicorn==0.24.0
@@ -19,6 +24,9 @@ tenseal==0.3.14
 opacus==1.4.1
 matplotlib==3.8.2
 
+# Federated Learning
+flwr==1.5.0
+
 # Security
 cryptography==41.0.5
 python-jose[cryptography]==3.3.0
@@ -32,10 +40,15 @@ requests==2.31.0
 tqdm==4.66.1
 loguru==0.7.2
 schedule==1.2.1
+redis==5.0.1
+psutil==5.9.6
 
 # Testing
 pytest==7.4.3
 pytest-asyncio==0.21.1
 httpx==0.25.1
 pytest-cov==4.1.0 
-natsort==8.4.0 
+natsort==8.4.0
+
+# Data Generation
+Faker==19.13.0 
