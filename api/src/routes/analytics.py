@@ -5,12 +5,13 @@ Analytics routes for the biometric authentication system
 from fastapi import APIRouter, Depends, HTTPException, status
 from sqlalchemy.orm import Session
 from sqlalchemy import desc
-from typing import Dict, List, Optional
+from typing import Dict, List, Optional, Union, Any
 from datetime import datetime, timedelta
 import logging
 import json
 import uuid
 import pytz
+import ast
 
 from ..db.database import get_db, User, AuthenticationLog
 from ..utils.security import get_current_user
@@ -19,6 +20,52 @@ logger = logging.getLogger(__name__)
 
 # Initialize router
 router = APIRouter(tags=["analytics"])
+
+def safe_parse_emotion_data(emotion_data: Any) -> Dict:
+    """
+    Safely parse emotion data that might not be in valid JSON format.
+    Tries multiple approaches to convert the data into a usable dictionary.
+    """
+    # If it's already a dict, return it
+    if isinstance(emotion_data, dict):
+        return emotion_data
+        
+    # If it's a string, try to parse it
+    if isinstance(emotion_data, str) and emotion_data.strip():
+        # Check if it's a simple emotion name
+        if emotion_data.strip().lower() in ['happiness', 'sadness', 'anger', 'fear', 'disgust', 'surprise', 'neutral']:
+            return {emotion_data.strip().lower(): 1.0}
+            
+        # Try standard JSON parsing first
+        try:
+            return json.loads(emotion_data)
+        except json.JSONDecodeError as e:
+            # Only log warnings for issues other than the common property name quoting issue
+            if "Expecting property name enclosed in double quotes" not in str(e):
+                logger.warning(f"Error parsing emotion data: {e}")
+            
+            # Try to fix common JSON format issues
+            try:
+                # Try to evaluate as Python dict literal (handles single quotes)
+                # This is safer than using eval() directly
+                return ast.literal_eval(emotion_data)
+            except (ValueError, SyntaxError) as e:
+                if "Expecting property name enclosed in double quotes" not in str(e):
+                    logger.warning(f"Failed to parse emotion data as Python dict: {e}")
+                
+                # If it looks like a dict but with single quotes, try a simple replacement
+                # Note: This is a simple approach and may not work for complex nested structures
+                if emotion_data.startswith('{') and emotion_data.endswith('}'):
+                    try:
+                        # Replace single quotes with double quotes, but be careful with nested quotes
+                        fixed_json = emotion_data.replace("'", '"')
+                        return json.loads(fixed_json)
+                    except json.JSONDecodeError:
+                        if "Expecting property name enclosed in double quotes" not in str(e):
+                            logger.warning(f"Failed to parse emotion data after quote replacement")
+
+    # Return empty dict if all parsing attempts fail
+    return {}
 
 def normalize_emotion_data(emotion_data: Dict) -> Dict[str, float]:
     """Normalize emotion data to a consistent format with numeric values"""
@@ -249,8 +296,8 @@ async def get_hr_analytics(
                                 emotion_data = {emotion_data.strip().lower(): 1.0}
                             else:
                                 try:
-                                    emotion_data = json.loads(emotion_data)
-                                except json.JSONDecodeError:
+                                    emotion_data = safe_parse_emotion_data(emotion_data)
+                                except Exception as e:
                                     logger.warning(f"Failed to parse emotion data as JSON: {emotion_data[:30]}...")
                                     continue
                         else:
@@ -301,8 +348,8 @@ async def get_hr_analytics(
                                     emotion_data = {emotion_data.strip().lower(): 1.0}
                                 else:
                                     try:
-                                        emotion_data = json.loads(emotion_data)
-                                    except json.JSONDecodeError:
+                                        emotion_data = safe_parse_emotion_data(emotion_data)
+                                    except Exception as e:
                                         logger.warning(f"Failed to parse emotion data as JSON for department {dept}: {emotion_data[:30]}...")
                                         continue
                             else:
@@ -349,19 +396,14 @@ async def get_hr_analytics(
                             emotion_data = log.emotion_data
                         elif isinstance(log.emotion_data, str):
                             try:
-                                # Try to parse as JSON, but handle empty strings and invalid JSON
                                 if not log.emotion_data.strip():
                                     # Skip empty strings
                                     continue
-                                    
-                                emotion_data = json.loads(log.emotion_data)
-                            except json.JSONDecodeError:
-                                # Try to handle common cases where the emotion is just a string
-                                if log.emotion_data.strip().lower() in ['happiness', 'sadness', 'anger', 'fear', 'disgust', 'surprise', 'neutral']:
-                                    # Create a simple emotion dict with the string as the key
-                                    emotion_data = {log.emotion_data.strip().lower(): 1.0}
-                                else:
-                                    continue
+                                
+                                emotion_data = safe_parse_emotion_data(log.emotion_data)
+                            except Exception as e:
+                                logger.warning(f"Error parsing emotion data: {str(e)}")
+                                continue
                         else:
                             logger.warning(f"Unexpected emotion_data type in day logs: {type(log.emotion_data)}")
                             continue
@@ -455,7 +497,7 @@ async def get_auth_analytics(
             if log.emotion_data:
                 try:
                     # Parse emotion data
-                    emotion_data = json.loads(log.emotion_data) if isinstance(log.emotion_data, str) else log.emotion_data
+                    emotion_data = safe_parse_emotion_data(log.emotion_data)
                     
                     # Use the normalize_emotion_data function to handle all cases
                     normalized_emotions = normalize_emotion_data(emotion_data)
@@ -552,7 +594,7 @@ async def get_auth_logs(
                 "user_id": log.user_id,
                 "success": log.success,
                 "confidence": log.confidence,
-                "emotion_data": json.loads(log.emotion_data) if log.emotion_data else None,
+                "emotion_data": safe_parse_emotion_data(log.emotion_data) if log.emotion_data else None,
                 "created_at": log.created_at.isoformat(),
                 "device_info": log.device_info
             }
@@ -567,7 +609,7 @@ async def get_auth_logs(
                 "user_id": log.user_id,
                 "success": log.success,
                 "confidence": log.confidence,
-                "emotion_data": json.loads(log.emotion_data) if log.emotion_data else None,
+                "emotion_data": safe_parse_emotion_data(log.emotion_data) if log.emotion_data else None,
                 "created_at": log.created_at.isoformat(),
                 "device_info": log.device_info
             } for log in logs]
@@ -583,7 +625,7 @@ async def get_auth_logs(
                 "user_id": log.user_id,
                 "success": log.success,
                 "confidence": log.confidence,
-                "emotion_data": json.loads(log.emotion_data) if log.emotion_data else None,
+                "emotion_data": safe_parse_emotion_data(log.emotion_data) if log.emotion_data else None,
                 "created_at": log.created_at.isoformat(),
                 "device_info": log.device_info
             } for log in logs]

@@ -1,4 +1,4 @@
-# Use PyTorch CUDA base image
+# Use PyTorch base image
 FROM pytorch/pytorch:2.1.1-cuda12.1-cudnn8-runtime
 
 # Set environment variables
@@ -7,12 +7,15 @@ ENV CUDA_VISIBLE_DEVICES=0
 ENV TORCH_USE_CUDA_DSA=1
 ENV CUDA_LAUNCH_BLOCKING=1
 ENV RELOAD=true
+ENV IS_SERVER=false
+# Set non-interactive installation
+ENV DEBIAN_FRONTEND=noninteractive
+ENV TZ=UTC
 
-# Install system dependencies
+# Install minimal system dependencies
 RUN apt-get update && apt-get install -y \
     wget \
     sqlite3 \
-    iputils-ping \
     && rm -rf /var/lib/apt/lists/*
 
 # Create necessary directories
@@ -24,11 +27,11 @@ WORKDIR /app
 # Copy only requirements first to leverage Docker cache
 COPY api/requirements.txt requirements.txt
 
-# Install Python dependencies
+# Install Python dependencies (excluding PyTorch as it's in base image)
 RUN pip install --no-cache-dir -r requirements.txt
 
-# Copy application files (these will be overridden by volume mount in development)
-COPY api /app/api/
+# Copy application files
+COPY . /app
 
-# Set default command (can be overridden by docker-compose)
-CMD ["uvicorn", "api.src.main:app", "--host", "0.0.0.0", "--port", "8000", "--reload", "--reload-dir", "/app/api"] 
+# Set default command
+CMD ["uvicorn", "api.src.app:app", "--host", "0.0.0.0", "--port", "8000", "--reload"] 

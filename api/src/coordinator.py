@@ -8,26 +8,44 @@ import logging
 import json
 import time
 import asyncio
-from datetime import datetime
-from typing import Dict, List, Optional, Any
+from datetime import datetime, timedelta
+from typing import Dict, List, Optional, Any, Tuple
 from pathlib import Path
+import hashlib
+import uuid
+import sys
 
 import torch
+import torch.nn as nn
 import torch.nn.functional as F
 import numpy as np
-from fastapi import FastAPI, BackgroundTasks, HTTPException, UploadFile, File
+from fastapi import FastAPI, BackgroundTasks, HTTPException, UploadFile, File, Body, Request
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse, FileResponse
 from pydantic import BaseModel
 import uvicorn
+from sqlalchemy.orm import Session
 
-# Import privacy components
-from .privacy.privacy_engine import PrivacyEngine
-from .utils.security import generate_uuid
+from .models.privacy_biometric_model import PrivacyBiometricModel
+from privacy_biometrics.utils import MappingManager
 
 # Configure logging
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
+# Suppress Opacus validator info messages
+logging.getLogger('opacus.validators.module_validator').setLevel(logging.WARNING)
+logging.getLogger('opacus.validators.batch_norm').setLevel(logging.WARNING)
+
+# Import privacy components
+from .privacy.privacy_engine import PrivacyEngine
+from .utils.security import generate_uuid
+from .db.database import get_db
+from .utils.datetime_utils import get_current_time, get_current_time_str, get_current_time_formatted
+
+# Force CPU usage regardless of CUDA availability
+torch.cuda.is_available = lambda: False
+device = torch.device('cpu')
+logger.info("Coordinator using CPU (forced)")
 
 # Initialize FastAPI app
 app = FastAPI(
@@ -51,6 +69,10 @@ class ClientInfo(BaseModel):
     dataset_size: int
     model_version: Optional[str] = None
     privacy_budget_remaining: Optional[float] = None
+    
+    model_config = {
+        'protected_namespaces': ()
+    }
 
 class FederatedRound(BaseModel):
     round_id: int
@@ -59,14 +81,32 @@ class FederatedRound(BaseModel):
     active_clients: List[str] = []
     aggregation_completed: bool = False
     metrics: Optional[Dict[str, float]] = None
+    
+    model_config = {
+        'protected_namespaces': ()
+    }
 
 class ModelUpdateRequest(BaseModel):
     client_id: str
     round_id: int
-    model_update_type: str = "weights"  # weights or gradients
+    update_type: str = "weights"  # Renamed from model_update_type
     dataset_size: int
     privacy_metrics: Optional[Dict[str, float]] = None
     training_metrics: Optional[Dict[str, float]] = None
+    mapping_size: int
+    
+    model_config = {
+        'protected_namespaces': ()
+    }
+
+class MappingUpdateRequest(BaseModel):
+    """Request model for updating global mapping"""
+    classes: List[str]
+    force_update: bool = False
+    
+    model_config = {
+        'protected_namespaces': ()
+    }
 
 # Global state
 global_model = None
@@ -79,7 +119,8 @@ federated_config = {
     'noise_multiplier': float(os.getenv('DP_NOISE_MULTIPLIER', '0.2')),
     'max_grad_norm': float(os.getenv('DP_MAX_GRAD_NORM', '5.0')),
     'delta': float(os.getenv('DP_DELTA', '1e-5')),
-    'enable_dp': os.getenv('ENABLE_DP', 'true').lower() == 'true'
+    'enable_dp': os.getenv('ENABLE_DP', 'true').lower() == 'true',
+    'num_identities': int(os.getenv('NUM_IDENTITIES', '100')),
 }
 
 # Create directory for model storage
@@ -88,56 +129,365 @@ model_dir.mkdir(exist_ok=True)
 model_history_dir = model_dir / "history"
 model_history_dir.mkdir(exist_ok=True)
 
+# Path for storing global mapping
+GLOBAL_MAPPING_PATH = Path("/app/models/mappings/global_mapping.json")
+
+# Memory cache for faster access
+_global_mapping_cache = None
+
+# Global centralized mapping manager
+_mapping_manager = None
+
+def get_mapping_manager() -> MappingManager:
+    """Get or create global mapping manager instance"""
+    global _mapping_manager
+    if _mapping_manager is None:
+        _mapping_manager = MappingManager()
+        logger.info("Initialized centralized mapping manager")
+    return _mapping_manager
+
+def get_current_mapping() -> Dict[str, Any]:
+    """
+    Get current mapping using centralized identity_mapping.json
+    
+    Returns:
+        Dictionary with mapping information in coordinator format
+    """
+    try:
+        mapping_manager = get_mapping_manager()
+        
+        if not mapping_manager.mapping:
+            logger.error("No mapping available from centralized manager")
+            return {"error": "No mapping available"}
+        
+        # Convert to coordinator format
+        mapping_info = mapping_manager.get_mapping_info()
+        
+        # Get the raw mapping
+        identity_mapping = mapping_manager.get_mapping()
+        reverse_mapping = mapping_manager.get_reverse_mapping()
+        
+        # Format for coordinator consumption
+        coordinator_mapping = {
+            "version": mapping_info.get("version", "1.0.0"),
+            "total_identities": len(identity_mapping),
+            "mapping_hash": mapping_info.get("mapping_hash", ""),
+            "source_file": mapping_info.get("source_file", "unknown"),
+            
+            # Identity mappings
+            "identity_to_index": identity_mapping,
+            "index_to_identity": {str(k): v for k, v in reverse_mapping.items()},
+            
+            # Metadata
+            "loaded_identities": len(identity_mapping),
+            "identity_range": mapping_info.get("identity_range", {}),
+            
+            # Legacy compatibility
+            "mapping": identity_mapping,  # For backward compatibility
+            "reverse_mapping": reverse_mapping
+        }
+        
+        logger.info(f"Retrieved centralized mapping with {len(identity_mapping)} identities")
+        return coordinator_mapping
+        
+    except Exception as e:
+        logger.error(f"Error getting centralized mapping: {e}")
+        return {"error": f"Failed to get mapping: {str(e)}"}
+
+def validate_client_mapping(client_mapping: Dict[str, Any]) -> bool:
+    """
+    Validate client mapping against centralized mapping
+    
+    Args:
+        client_mapping: Client's mapping to validate
+        
+    Returns:
+        True if valid, False otherwise
+    """
+    try:
+        mapping_manager = get_mapping_manager()
+        
+        if not mapping_manager.mapping:
+            logger.error("No centralized mapping available for validation")
+            return False
+        
+        # Extract client's identity mapping
+        if "identity_to_index" in client_mapping:
+            client_identities = client_mapping["identity_to_index"]
+        elif "mapping" in client_mapping:
+            client_identities = client_mapping["mapping"]
+        else:
+            logger.error("Client mapping missing required fields")
+            return False
+        
+        # Validate against centralized mapping
+        is_valid = mapping_manager.validate_mapping(client_identities)
+        
+        if is_valid:
+            logger.info(f"Client mapping validated successfully ({len(client_identities)} identities)")
+        else:
+            logger.warning("Client mapping validation failed")
+        
+        return is_valid
+        
+    except Exception as e:
+        logger.error(f"Error validating client mapping: {e}")
+        return False
+
+def get_identity_by_index(index: int) -> Optional[str]:
+    """
+    Get identity name by index using centralized mapping
+    
+    Args:
+        index: Identity index
+        
+    Returns:
+        Identity name if found, None otherwise
+    """
+    try:
+        mapping_manager = get_mapping_manager()
+        return mapping_manager.get_identity(index)
+    except Exception as e:
+        logger.error(f"Error getting identity for index {index}: {e}")
+        return None
+
+def get_index_by_identity(identity: str) -> Optional[int]:
+    """
+    Get index by identity name using centralized mapping
+    
+    Args:
+        identity: Identity name
+        
+    Returns:
+        Index if found, None otherwise
+    """
+    try:
+        mapping_manager = get_mapping_manager()
+        return mapping_manager.get_index(identity)
+    except Exception as e:
+        logger.error(f"Error getting index for identity {identity}: {e}")
+        return None
+
+def get_all_identities() -> List[str]:
+    """
+    Get all identity names from centralized mapping
+    
+    Returns:
+        List of identity names
+    """
+    try:
+        mapping_manager = get_mapping_manager()
+        return list(mapping_manager.mapping.keys())
+    except Exception as e:
+        logger.error(f"Error getting all identities: {e}")
+        return []
+
+def get_mapping_statistics() -> Dict[str, Any]:
+    """
+    Get comprehensive mapping statistics
+    
+    Returns:
+        Dictionary with mapping statistics
+    """
+    try:
+        mapping_manager = get_mapping_manager()
+        mapping_info = mapping_manager.get_mapping_info()
+        
+        # Add coordinator-specific statistics
+        statistics = {
+            **mapping_info,
+            "coordinator_version": "2.0.0",
+            "centralized_mapping": True,
+            "validation_status": "active"
+        }
+        
+        return statistics
+        
+    except Exception as e:
+        logger.error(f"Error getting mapping statistics: {e}")
+        return {"error": f"Failed to get statistics: {str(e)}"}
+
+def refresh_mapping() -> bool:
+    """
+    Refresh mapping from centralized source
+    
+    Returns:
+        True if successfully refreshed, False otherwise
+    """
+    try:
+        global _mapping_manager
+        _mapping_manager = None  # Reset to force reload
+        mapping_manager = get_mapping_manager()  # This will create a new instance
+        
+        if mapping_manager.mapping:
+            logger.info("Successfully refreshed centralized mapping")
+            return True
+        else:
+            logger.error("Failed to refresh centralized mapping")
+            return False
+            
+    except Exception as e:
+        logger.error(f"Error refreshing mapping: {e}")
+        return False
+
+def create_client_mapping_subset(client_data_dir: str) -> Dict[str, Any]:
+    """
+    Create a mapping subset for a specific client based on their data directory
+    
+    Args:
+        client_data_dir: Path to client's data directory
+        
+    Returns:
+        Dictionary with client-specific mapping
+    """
+    try:
+        mapping_manager = get_mapping_manager()
+        
+        # Get filtered mapping for the client's data directory
+        client_mapping = mapping_manager.get_mapping_for_data_dir(client_data_dir)
+        
+        if not client_mapping:
+            logger.warning(f"No identities found for client data directory: {client_data_dir}")
+            return {"error": "No identities found"}
+        
+        # Create reverse mapping
+        client_reverse_mapping = {v: k for k, v in client_mapping.items()}
+        
+        # Format for client consumption
+        client_subset = {
+            "version": mapping_manager.version,
+            "total_identities": len(client_mapping),
+            "data_directory": client_data_dir,
+            "mapping_hash": mapping_manager.mapping_hash,
+            "source_file": mapping_manager.identity_mapping_file,
+            
+            # Client-specific mappings
+            "identity_to_index": client_mapping,
+            "index_to_identity": {str(k): v for k, v in client_reverse_mapping.items()},
+            
+            # Legacy compatibility
+            "mapping": client_mapping,
+            "reverse_mapping": client_reverse_mapping
+        }
+        
+        logger.info(f"Created client mapping subset with {len(client_mapping)} identities for {client_data_dir}")
+        return client_subset
+        
+    except Exception as e:
+        logger.error(f"Error creating client mapping subset: {e}")
+        return {"error": f"Failed to create subset: {str(e)}"}
+
+# Legacy compatibility functions
+def load_from_identity_mapping() -> Optional[Dict[str, Any]]:
+    """
+    Legacy function for loading from identity_mapping.json
+    Now uses centralized mapping manager
+    
+    Returns:
+        Mapping dictionary or None if failed
+    """
+    try:
+        current_mapping = get_current_mapping()
+        if "error" in current_mapping:
+            return None
+        return current_mapping
+    except Exception as e:
+        logger.error(f"Error in legacy load_from_identity_mapping: {e}")
+        return None
+
+# Legacy functions removed - now using centralized mapping manager
+
 def load_or_create_global_model():
-    """Load or create the global federated model"""
+    """Load or create the global model"""
     global global_model
     
+    # Create model directory if it doesn't exist
+    model_dir.mkdir(exist_ok=True, parents=True)
+    model_history_dir.mkdir(exist_ok=True, parents=True)
+    
+    # Get current mapping using centralized manager
+    mapping_data = get_current_mapping()
+    if "error" in mapping_data:
+        logger.error(f"Failed to get centralized mapping: {mapping_data['error']}")
+        num_identities = federated_config['num_identities']
+    else:
+        num_identities = mapping_data.get('total_identities', federated_config['num_identities'])
+    
+    logger.info(f"Using {num_identities} identities from centralized mapping")
+    
+    # Define model path
+    model_path = model_dir / "best_pretrained_model.pth"
+    
     try:
-        # Import dynamically to avoid circular import
-        from .models.privacy_biometric_model import PrivacyBiometricModel
-    except ImportError:
-        logger.error("Failed to import PrivacyBiometricModel")
-        raise ImportError("Missing privacy_biometric_model module")
-    
-    # Set model path
-    model_path = Path(os.getenv('MODEL_PATH', '/app/models/best_pretrained_model.pth'))
-    
-    if not model_path.exists():
-        logger.warning(f"Model file not found at {model_path}, creating new model")
-        # Load number of identities from config or use default 
-        num_identities = 100  # Default
-        global_model = PrivacyBiometricModel(
+        if model_path.exists():
+            logger.info(f"Loading global model from {model_path}")
+            # Load state dictionary
+            state_dict = torch.load(model_path, map_location='cpu')
+            
+            # Handle metadata wrapper
+            if isinstance(state_dict, dict) and 'state_dict' in state_dict:
+                stored_num_identities = state_dict.get('num_identities', num_identities)
+                embedding_dim = state_dict.get('feature_dim', 512)
+                backbone_output_dim = state_dict.get('backbone_output_dim', 2048)
+                mapping_version = state_dict.get('mapping_version')
+                mapping_hash = state_dict.get('mapping_hash')
+                state_dict = state_dict['state_dict']
+                
+                # Verify mapping consistency
+                if stored_num_identities != num_identities:
+                    logger.warning(f"Stored model has different number of identities ({stored_num_identities}) than current mapping ({num_identities})")
+                    # We'll create a new model with correct size
+                    raise ValueError("Model size mismatch with current mapping")
+            else:
+                embedding_dim = 512
+                backbone_output_dim = 2048
+            
+            # Create model with correct parameters
+            model = PrivacyBiometricModel(
+                num_identities=num_identities,
+                embedding_dim=embedding_dim,
+                privacy_enabled=federated_config['enable_dp']
+            ).to(device)
+            
+            # Load weights
+            try:
+                model.load_state_dict(state_dict, strict=False)
+                logger.info(f"Successfully loaded model with {num_identities} identities")
+            except Exception as e:
+                logger.error(f"Error loading state dict: {e}")
+                raise ValueError("Failed to load model weights")
+                
+        else:
+            logger.info("Global model not found, creating new one")
+            # Create a new model with mapping-based parameters
+            model = PrivacyBiometricModel(
+                num_identities=num_identities,
+                privacy_enabled=federated_config['enable_dp']
+            ).to(device)
+            
+            # Save initial model with mapping metadata
+            save_model_version(model, 0, {
+                'num_identities': num_identities,
+                'mapping_version': get_current_time_str(),
+                'mapping_hash': mapping_data.get('mapping_hash', 'unknown')[:8]
+            })
+            
+    except Exception as e:
+        logger.error(f"Error loading/creating global model: {e}")
+        # Create a new model as fallback
+        model = PrivacyBiometricModel(
             num_identities=num_identities,
             privacy_enabled=federated_config['enable_dp']
-        )
+        ).to(device)
         # Save initial model
-        torch.save(global_model.state_dict(), model_path)
-        logger.info(f"Created new global model with {num_identities} identities")
-    else:
-        logger.info(f"Loading global model from {model_path}")
-        # Load state dictionary
-        state_dict = torch.load(model_path, map_location='cpu')
-        
-        # Determine params from state_dict
-        num_identities = 100  # Default
-        if isinstance(state_dict, dict) and 'state_dict' in state_dict:
-            num_identities = state_dict.get('num_identities', 100)
-        
-        # Create model with correct parameters
-        global_model = PrivacyBiometricModel(
-            num_identities=num_identities, 
-            privacy_enabled=federated_config['enable_dp']
-        )
-        
-        # Load weights
-        if isinstance(state_dict, dict) and 'state_dict' in state_dict:
-            global_model.load_state_dict(state_dict['state_dict'])
-        else:
-            global_model.load_state_dict(state_dict)
-            
-        logger.info(f"Global model loaded with {num_identities} identities")
+        save_model_version(model, 0, {
+            'num_identities': num_identities,
+            'mapping_version': get_current_time_str(),
+            'mapping_hash': hashlib.sha256(json.dumps(mapping).encode()).hexdigest()[:8]
+        })
     
-    global_model.eval()  # Set to evaluation mode
+    model.eval()  # Set to evaluation mode
+    global_model = model
     return global_model
 
 def aggregate_model_updates(updates: Dict[str, Dict]) -> Dict:
@@ -169,37 +519,47 @@ def aggregate_model_updates(updates: Dict[str, Dict]) -> Dict:
     
     return avg_params
 
-def save_model_version(model, round_id: int, metrics: Dict[str, float] = None):
+def save_model_version(model: nn.Module, round_id: int, metrics: Dict) -> Path:
     """Save a version of the model with metadata"""
-    timestamp = datetime.utcnow().strftime("%Y%m%d_%H%M%S")
-    filename = f"model_round_{round_id}_{timestamp}.pth"
-    save_path = model_history_dir / filename
-    
-    # Create metadata
-    metadata = {
-        'round_id': round_id,
-        'timestamp': timestamp,
-        'metrics': metrics or {},
-        'active_clients': len(client_updates),
-        'client_ids': list(client_updates.keys()),
-    }
-    
-    # Save model with metadata
-    torch.save({
-        'state_dict': model.state_dict(),
-        'metadata': metadata,
-        'num_identities': getattr(model, 'num_identities', 100)
-    }, save_path)
-    
-    # Update current global model
-    torch.save({
-        'state_dict': model.state_dict(),
-        'metadata': metadata,
-        'num_identities': getattr(model, 'num_identities', 100)
-    }, model_dir / "global_model.pth")
-    
-    logger.info(f"Saved model version for round {round_id} at {save_path}")
-    return str(save_path)
+    try:
+        # Create filename with round number
+        timestamp = get_current_time_str()
+        filename = f"model_round_{round_id}_{timestamp}.pth"
+        save_path = model_history_dir / filename
+        
+        # Get current mapping info
+        mapping = get_current_mapping()
+        mapping_size = len(mapping) if mapping else 0
+        mapping_hash = hashlib.sha256(json.dumps(sorted(mapping.items())).encode()).hexdigest()[:8] if mapping else None
+        
+        # Save model with metadata
+        save_dict = {
+            'state_dict': model.state_dict(),
+            'round_id': round_id,
+            'timestamp': timestamp,
+            'num_identities': model.num_identities,
+            'feature_dim': model.embedding_dim,
+            'backbone_output_dim': getattr(model, "backbone_output_dim", None),
+            'privacy_enabled': model.privacy_enabled,
+            'mapping_size': mapping_size,
+            'mapping_hash': mapping_hash,
+            'mapping_version': get_current_time_str(),
+            'metrics': metrics
+        }
+        
+        # Save to history directory
+        torch.save(save_dict, save_path)
+        
+        # Also update the best model
+        best_model_path = model_dir / "best_pretrained_model.pth"
+        torch.save(save_dict, best_model_path)
+        
+        logger.info(f"Saved model version for round {round_id} to {save_path}")
+        return save_path
+        
+    except Exception as e:
+        logger.error(f"Error saving model version: {e}")
+        return None
 
 def create_new_round():
     """Initialize a new federated learning round"""
@@ -216,7 +576,7 @@ def create_new_round():
     # Create new round
     current_round = FederatedRound(
         round_id=round_id,
-        start_time=datetime.utcnow(),
+        start_time=get_current_time(),
         status="active"
     )
     
@@ -230,13 +590,17 @@ def evaluate_global_model(model):
     return {
         'accuracy': 0.85,
         'loss': 0.15,
-        'timestamp': datetime.utcnow().isoformat()
+        'timestamp': get_current_time_str()
     }
 
 @app.on_event("startup")
 async def startup_event():
     """Initialize coordinator on startup"""
     logger.info("Starting Federated Learning Coordinator...")
+    
+    # Ensure we're using the correct model path for the server
+    os.environ["MODEL_PATH"] = "/app/models/best_pretrained_model.pth"
+    logger.info(f"Server will load model from: {os.environ['MODEL_PATH']}")
     
     # Load global model
     load_or_create_global_model()
@@ -251,7 +615,7 @@ async def health_check():
     """Health check endpoint"""
     return {
         "status": "healthy",
-        "timestamp": datetime.utcnow().isoformat()
+        "timestamp": get_current_time_str()
     }
 
 @app.get("/config")
@@ -364,90 +728,105 @@ async def download_global_model():
     )
 
 @app.post("/models/update")
-async def submit_model_update(update_info: ModelUpdateRequest, background_tasks: BackgroundTasks):
-    """Submit a model update for the current round"""
+async def notify_model_update(request: ModelUpdateRequest):
+    """Notify coordinator of pending model update"""
     global client_updates, current_round
     
-    # Validate client
-    if update_info.client_id not in registered_clients:
-        raise HTTPException(status_code=403, detail="Client not registered")
-    
-    # Validate round
-    if not current_round or update_info.round_id != current_round.round_id:
-        raise HTTPException(status_code=400, detail="Invalid round ID")
-    
-    # Store client metadata
-    client_updates[update_info.client_id] = {
-        "dataset_size": update_info.dataset_size,
-        "waiting_for_parameters": True,
-        "received_at": datetime.utcnow().isoformat(),
-        "training_metrics": update_info.training_metrics,
-        "privacy_metrics": update_info.privacy_metrics
-    }
-    
-    # Update round status
-    current_round.active_clients = list(client_updates.keys())
-    
-    logger.info(f"Received update info from {update_info.client_id} for round {update_info.round_id}")
-    
-    return {
-        "success": True, 
-        "upload_url": f"/models/update/{update_info.client_id}/{update_info.round_id}/upload",
-        "client_count": len(client_updates)
-    }
-
-@app.post("/models/update/{client_id}/{round_id}/upload")
-async def upload_model_parameters(
-    client_id: str, 
-    round_id: int, 
-    model_file: UploadFile = File(...),
-    background_tasks: BackgroundTasks = None
-):
-    """Upload model parameters for a round"""
-    global client_updates, current_round, global_model
-    
-    if client_id not in client_updates:
-        raise HTTPException(status_code=403, detail="Update not initiated")
-    
-    if int(round_id) != current_round.round_id:
-        raise HTTPException(status_code=400, detail="Invalid round ID")
+    logger.info(f"Model update notification from client {request.client_id}")
     
     try:
-        # Read uploaded model file
-        contents = await model_file.read()
+        # Verify client is registered
+        if request.client_id not in registered_clients:
+            raise HTTPException(status_code=400, detail="Client not registered")
         
-        # Save temporarily
-        temp_path = f"/app/cache/temp_model_{client_id}_{round_id}.pth"
-        with open(temp_path, "wb") as f:
-            f.write(contents)
+        # Verify round is active
+        if not current_round or current_round.status != "active":
+            raise HTTPException(status_code=400, detail="No active round")
         
-        # Load parameters
-        client_state_dict = torch.load(temp_path, map_location='cpu')
+        # Verify round number matches
+        if request.round_id != current_round.round_id:
+            raise HTTPException(status_code=400, detail=f"Invalid round ID. Expected {current_round.round_id}, got {request.round_id}")
         
-        # Store client parameters
-        client_updates[client_id]["parameters"] = client_state_dict
-        client_updates[client_id]["waiting_for_parameters"] = False
+        # Get current mapping size
+        mapping = get_current_mapping()
+        if not mapping:
+            raise HTTPException(status_code=500, detail="Global mapping not available")
         
-        logger.info(f"Received parameters from {client_id} for round {round_id}")
+        # Verify mapping size matches
+        if request.mapping_size != len(mapping):
+            raise HTTPException(
+                status_code=400, 
+                detail=f"Mapping size mismatch. Server has {len(mapping)} classes, client has {request.mapping_size}"
+            )
         
-        # Check if all expected clients have submitted updates
-        ready_for_aggregation = all(
-            not update.get("waiting_for_parameters", True) 
-            for update in client_updates.values()
-        )
+        return {"success": True, "round_id": current_round.round_id}
         
-        # If all expected clients submitted, aggregate in background
-        if ready_for_aggregation and len(client_updates) > 0:
-            if background_tasks:
-                background_tasks.add_task(aggregate_and_update_model)
-            else:
-                asyncio.create_task(aggregate_and_update_model())
-        
-        return {"success": True, "ready_for_aggregation": ready_for_aggregation}
-    
+    except HTTPException:
+        raise
     except Exception as e:
-        logger.error(f"Error processing model upload: {str(e)}")
-        raise HTTPException(status_code=500, detail=f"Failed to process model: {str(e)}")
+        logger.error(f"Error processing model update notification: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
+
+@app.post("/models/update/{client_id}/{round_id}/upload")
+async def upload_model_update(
+    client_id: str,
+    round_id: int,
+    update: Dict = Body(...)
+):
+    """Upload model weights for federated learning"""
+    global client_updates, current_round
+    
+    logger.info(f"Receiving model update from client {client_id} for round {round_id}")
+    
+    try:
+        # Verify client is registered
+        if client_id not in registered_clients:
+            raise HTTPException(status_code=400, detail="Client not registered")
+        
+        # Verify round is active
+        if not current_round or current_round.status != "active":
+            raise HTTPException(status_code=400, detail="No active round")
+        
+        # Verify round number matches
+        if round_id != current_round.round_id:
+            raise HTTPException(status_code=400, detail=f"Invalid round ID. Expected {current_round.round_id}, got {round_id}")
+        
+        # Get current mapping size
+        mapping = get_current_mapping()
+        if not mapping:
+            raise HTTPException(status_code=500, detail="Global mapping not available")
+        
+        # Verify mapping size in metadata
+        if update.get("mapping_size") != len(mapping):
+            raise HTTPException(
+                status_code=400,
+                detail=f"Mapping size mismatch. Server has {len(mapping)} classes, client has {update.get('mapping_size')}"
+            )
+        
+        # Store update
+        client_updates[client_id] = {
+            "parameters": update["weights"],
+            "dataset_size": registered_clients[client_id].dataset_size,
+            "timestamp": get_current_time(),
+            "mapping_size": update["mapping_size"]
+        }
+        
+        # Add client to active clients list
+        if client_id not in current_round.active_clients:
+            current_round.active_clients.append(client_id)
+        
+        # Check if we have enough updates to aggregate
+        if len(client_updates) >= federated_config.get("min_clients", 2):
+            # Trigger aggregation in background
+            background_tasks.add_task(aggregate_and_update_model)
+        
+        return {"success": True, "message": "Model update received"}
+        
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"Error processing model update: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
 
 async def aggregate_and_update_model():
     """Aggregate client updates and update the global model"""
@@ -456,8 +835,29 @@ async def aggregate_and_update_model():
     logger.info(f"Starting model aggregation for round {current_round.round_id}")
     
     try:
+        # Verify mapping consistency
+        mapping = get_current_mapping()
+        if not mapping:
+            raise ValueError("Global mapping not available")
+        
+        mapping_size = len(mapping)
+        mapping_hash = hashlib.sha256(json.dumps(sorted(mapping.items())).encode()).hexdigest()[:8]
+        
+        # Verify all clients have correct mapping size and version
+        for client_id, update in client_updates.items():
+            if update["mapping_size"] != mapping_size:
+                raise ValueError(f"Mapping size mismatch for client {client_id}")
+            if update.get("mapping_hash") != mapping_hash:
+                raise ValueError(f"Mapping version mismatch for client {client_id}")
+        
         # Aggregate updates
         aggregated_params = aggregate_model_updates(client_updates)
+        
+        # Verify aggregated model dimensions
+        if 'classifier.weight' in aggregated_params:
+            classifier_size = aggregated_params['classifier.weight'].shape[0]
+            if classifier_size != mapping_size:
+                raise ValueError(f"Aggregated model classifier size ({classifier_size}) doesn't match mapping size ({mapping_size})")
         
         # Update global model
         global_model.load_state_dict(aggregated_params)
@@ -465,7 +865,14 @@ async def aggregate_and_update_model():
         # Evaluate the aggregated model
         metrics = evaluate_global_model(global_model)
         
-        # Save the new model version
+        # Add mapping metrics
+        metrics.update({
+            'mapping_size': mapping_size,
+            'mapping_hash': mapping_hash,
+            'mapping_version': get_current_time_str()
+        })
+        
+        # Save the new model version with mapping metadata
         save_path = save_model_version(global_model, current_round.round_id, metrics)
         
         # Update round status
@@ -479,11 +886,217 @@ async def aggregate_and_update_model():
         if current_round.round_id >= federated_config['federated_rounds']:
             current_round.status = "final"
             logger.info("Final federated round completed")
-        
+            
     except Exception as e:
-        logger.error(f"Error during model aggregation: {str(e)}")
+        logger.error(f"Error during model aggregation: {e}")
         current_round.status = "failed"
-        current_round.metrics = {"error": str(e)}
+        current_round.metrics = {'error': str(e)}
+        
+        # Create new round to continue training
+        create_new_round()
+
+@app.get("/api/mapping")
+async def get_global_mapping(request: Request):
+    """
+    Get the global class-to-user mapping using centralized identity_mapping.json
+    
+    Returns:
+        Dict with class indices as keys and user IDs as values
+    """
+    client_id = request.headers.get("X-Client-ID")
+    logger.info(f"Mapping request from client: {client_id}")
+    
+    mapping_data = get_current_mapping()
+    
+    if "error" in mapping_data:
+        return {
+            "success": False,
+            "error": mapping_data["error"],
+            "mapping": {},
+            "count": 0
+        }
+    
+    # Convert to legacy format for API compatibility
+    legacy_mapping = mapping_data.get("index_to_identity", {})
+    
+    return {
+        "success": True,
+        "mapping": legacy_mapping,
+        "count": len(legacy_mapping),
+        "version": mapping_data.get("version", "unknown"),
+        "source": "centralized_identity_mapping"
+    }
+
+@app.post("/api/mapping/update")
+async def update_global_mapping(request: MappingUpdateRequest):
+    """
+    Update the global class-to-user mapping
+    
+    Args:
+        request: Request containing array of classes in order
+        
+    Returns:
+        Updated mapping
+    """
+    logger.info("POST /api/mapping/update endpoint called")
+    try:
+        # Get current mapping - will be replaced
+        current_mapping = get_current_mapping()
+        
+        # Check if update is needed
+        if not request.force_update and current_mapping:
+            current_classes = list(current_mapping.values())
+            if current_classes == request.classes:
+                return {
+                    "success": True,
+                    "message": "Mapping unchanged - already matches requested classes",
+                    "mapping": current_mapping,
+                    "count": len(current_mapping)
+                }
+        
+        # Create new mapping from provided classes
+        new_mapping = {str(idx): class_id for idx, class_id in enumerate(request.classes)}
+        
+        # Save the new mapping
+        if save_mapping(new_mapping):
+            logger.info(f"Global mapping updated with {len(new_mapping)} classes")
+            
+            # Return the new mapping
+            return {
+                "success": True,
+                "message": "Global mapping updated successfully",
+                "mapping": new_mapping,
+                "count": len(new_mapping)
+            }
+        else:
+            raise HTTPException(status_code=500, detail="Failed to save global mapping")
+            
+    except Exception as e:
+        logger.error(f"Error updating global mapping: {e}")
+        raise HTTPException(status_code=500, detail=f"Failed to update global mapping: {str(e)}")
+
+@app.get("/api/mapping/generate")
+async def generate_mapping():
+    """
+    Generate a new global mapping from partitioned data directories
+    This follows the same approach as in improved_privacy_training.py
+    """
+    logger.info("GET /api/mapping/generate endpoint called")
+    try:
+        # Check if partitioned data directory exists
+        partitioned_path = Path("/app/data/partitioned")
+        directory_exists = partitioned_path.exists()
+        
+        # Generate new mapping from directories
+        new_mapping = generate_global_mapping_from_directories()
+        
+        if not new_mapping:
+            return {
+                "success": False,
+                "message": "Failed to generate mapping - no classes found",
+                "count": 0,
+                "directory_exists": directory_exists
+            }
+        
+        # Check if this is a default mapping
+        is_default = len(new_mapping) == 100 and all(new_mapping[str(i)] == str(i) for i in range(100))
+        
+        # Save the new mapping
+        if save_mapping(new_mapping):
+            logger.info(f"Generated and saved new global mapping with {len(new_mapping)} classes")
+            
+            return {
+                "success": True,
+                "message": "Global mapping generated successfully" + (" (using default mapping)" if is_default else ""),
+                "mapping": new_mapping,
+                "count": len(new_mapping),
+                "directory_exists": directory_exists,
+                "is_default_mapping": is_default,
+                "data_path": str(partitioned_path)
+            }
+        else:
+            raise HTTPException(status_code=500, detail="Failed to save generated mapping")
+            
+    except Exception as e:
+        logger.error(f"Error generating mapping: {e}")
+        raise HTTPException(status_code=500, detail=f"Failed to generate mapping: {str(e)}")
+
+@app.get("/api/mapping/refresh")
+async def refresh_global_mapping(request: Request):
+    """
+    Force refresh the global mapping from centralized identity_mapping.json
+    
+    Returns:
+        Updated mapping
+    """
+    try:
+        logger.info("Force refreshing global mapping from centralized source")
+        
+        # Get client ID from headers
+        client_id = request.headers.get("X-Client-ID")
+        logger.info(f"Mapping refresh request from client: {client_id}")
+        
+        # Refresh centralized mapping
+        success = refresh_mapping()
+        
+        if success:
+            mapping_data = get_current_mapping()
+            
+            if "error" not in mapping_data:
+                logger.info(f"Global mapping refreshed with {mapping_data.get('total_identities', 0)} identities")
+                
+                # Return the new mapping in legacy format
+                legacy_mapping = mapping_data.get("index_to_identity", {})
+                
+                return {
+                    "success": True,
+                    "message": "Global mapping refreshed successfully from centralized source",
+                    "mapping": legacy_mapping,
+                    "count": len(legacy_mapping),
+                    "version": mapping_data.get("version", "unknown"),
+                    "source": mapping_data.get("source_file", "unknown"),
+                    "timestamp": get_current_time_str()
+                }
+            else:
+                raise HTTPException(status_code=500, detail=f"Failed to get refreshed mapping: {mapping_data['error']}")
+        else:
+            raise HTTPException(status_code=500, detail="Failed to refresh centralized mapping")
+            
+    except Exception as e:
+        logger.error(f"Error refreshing global mapping: {e}")
+        raise HTTPException(status_code=500, detail=f"Failed to refresh global mapping: {str(e)}")
+
+@app.get("/api/mapping/debug")
+async def debug_mapping():
+    """Debug endpoint to view the current mapping status"""
+    try:
+        # Get client ID from headers
+        client_id = request.headers.get("X-Client-ID")
+        logger.info(f"Mapping debug request from client: {client_id}")
+        
+        # Check if mapping file exists
+        file_exists = GLOBAL_MAPPING_PATH.exists()
+        file_size = GLOBAL_MAPPING_PATH.stat().st_size if file_exists else 0
+        
+        # Get current mapping
+        mapping = get_current_mapping()
+        
+        # Get sample entries
+        sample = {k: mapping[k] for k in list(mapping.keys())[:5]} if mapping else {}
+        
+        return {
+            "success": True,
+            "file_exists": file_exists,
+            "file_path": str(GLOBAL_MAPPING_PATH),
+            "file_size": file_size,
+            "mapping_count": len(mapping),
+            "cache_active": _global_mapping_cache is not None,
+            "sample_entries": sample,
+            "timestamp": get_current_time_str()
+        }
+    except Exception as e:
+        logger.error(f"Error in debug mapping: {e}")
+        return {"success": False, "error": str(e)}
 
 if __name__ == "__main__":
     uvicorn.run("coordinator:app", host="0.0.0.0", port=8000, reload=True) 

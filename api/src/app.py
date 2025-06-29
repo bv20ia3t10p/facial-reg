@@ -10,6 +10,9 @@ from pathlib import Path
 # Configure logging
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
+# Suppress Opacus validator info messages
+logging.getLogger('opacus.validators.module_validator').setLevel(logging.WARNING)
+logging.getLogger('opacus.validators.batch_norm').setLevel(logging.WARNING)
 
 try:
     # Fix the federated_integration.py file
@@ -33,7 +36,7 @@ try:
                 
             logger.info("Fixed reference to 'Base' in federated_integration.py")
     
-    # Import the main app
+    # Import the main app without initializing services
     from .main import app
     logger.info("Successfully imported main app")
 except Exception as e:

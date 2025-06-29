@@ -12,6 +12,16 @@ import os
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 
+class EmotionService:
+    def __init__(self):
+        """Initialize the emotion service"""
+        self.analyzer = EmotionAnalyzer()
+        logger.info("Emotion service initialized")
+    
+    async def analyze_emotion(self, image_data: bytes) -> Dict[str, float]:
+        """Analyze emotions in an image"""
+        return await self.analyzer.analyze_emotion(image_data)
+
 class EmotionAnalyzer:
     def __init__(self):
         """Initialize the emotion analyzer"""
@@ -22,42 +32,15 @@ class EmotionAnalyzer:
         """Analyze emotions in an image using the emotion API"""
         try:
             endpoint = f"{self.api_url}/predict"
-            logger.info(f"Sending request to emotion API: {endpoint}")
             
             async with aiohttp.ClientSession() as session:
-                # Create form data with the image
-                form = aiohttp.FormData()
-                form.add_field('file', image_data, filename='image.jpg', content_type='image/jpeg')
-                
-                # Send request to emotion API
-                async with session.post(endpoint, data=form) as response:
-                    if response.status != 200:
-                        error_text = await response.text()
-                        logger.error(f"Emotion API error: {error_text}")
-                        raise Exception(f"Emotion API returned status {response.status}: {error_text}")
-                    
-                    result = await response.json()
-                    logger.info(f"Emotion API response: {json.dumps(result, indent=2)}")
-                    
-                    # The result directly contains emotion probabilities
-                    if not result or not any(k in result for k in ['neutral', 'happiness', 'sadness']):
-                        raise Exception("Invalid emotion data in API response")
-                    
-                    # Remove reliability score if present (it's not an emotion)
-                    if 'reliability' in result:
-                        del result['reliability']
-                    
-                    return result
-            
+                async with session.post(endpoint, data={'image': image_data}) as response:
+                    if response.status == 200:
+                        result = await response.json()
+                        return result.get('emotions', {})
+                    else:
+                        logger.error(f"Emotion API error: {response.status}")
+                        return {}
         except Exception as e:
-            logger.error(f"Emotion analysis failed: {e}")
-            # Return neutral emotion as fallback
-            return {
-                "neutral": 1.0,
-                "happiness": 0.0,
-                "surprise": 0.0,
-                "sadness": 0.0,
-                "anger": 0.0,
-                "disgust": 0.0,
-                "fear": 0.0
-            } 
+            logger.error(f"Failed to analyze emotion: {e}")
+            return {} 

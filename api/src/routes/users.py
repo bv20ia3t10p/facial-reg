@@ -19,7 +19,6 @@ from sqlalchemy.sql import text
 
 from ..db.database import User, create_user, get_db
 from ..services.service_init import biometric_service
-from ..utils.face_recognition import FaceRecognizer
 from ..utils.security import get_current_user, get_password_hash
 from ..utils.common import generate_uuid
 from ..models.privacy_biometric_model import PrivacyBiometricModel
@@ -45,9 +44,6 @@ except Exception as e:
 # Initialize router
 router = APIRouter()
 
-# Initialize face recognizer
-face_recognizer = FaceRecognizer()
-
 # Global variable to track if model is being trained
 model_training_in_progress = False
 
@@ -72,6 +68,15 @@ def train_model_task(db: Session = None):
             close_db = True
         
         try:
+            # Initialize mapping service
+            from ..services.mapping_service import MappingService
+            mapping_service = MappingService()
+            
+            # Get current global mapping
+            global_mapping = mapping_service.fetch_mapping(force_refresh=True)
+            if not global_mapping:
+                logger.warning("No global mapping available, will create new mapping")
+            
             # 1. Load all user face encodings from the database
             logger.info("Loading user face encodings from database...")
             users = db.execute(text("""
@@ -103,10 +108,21 @@ def train_model_task(db: Session = None):
             
             # Create a simple feature extractor to convert stored face encodings to feature vectors
             feature_extractor = face_recognizer.model
-            feature_extractor.eval()  # Set to evaluation mode
+            feature_extractor.eval()
             
             # Determine the feature dimension from the first encoding
             feature_dim = None
+            
+            # Track user ID to class index mapping
+            user_to_class_idx = {}
+            next_class_idx = 0
+            
+            # If we have a global mapping, use it to maintain consistent indices
+            if global_mapping:
+                # Invert the mapping to get user_id -> class_idx
+                for class_idx, user_id in global_mapping.items():
+                    user_to_class_idx[user_id] = int(class_idx)
+                next_class_idx = max(int(idx) for idx in global_mapping.keys()) + 1
             
             for i, user in enumerate(users):
                 try:
@@ -127,11 +143,16 @@ def train_model_task(db: Session = None):
                     # Convert to torch tensor
                     face_tensor = torch.from_numpy(face_encoding).float()
                     
+                    # Get or assign class index for this user
+                    if user.id not in user_to_class_idx:
+                        user_to_class_idx[user.id] = next_class_idx
+                        next_class_idx += 1
+                    
                     # Add to features list
                     user_features.append(face_tensor)
                     user_ids.append(user.id)
                     
-                    logger.debug(f"Processed face encoding for user {user.id}, shape: {face_tensor.shape}")
+                    logger.debug(f"Processed face encoding for user {user.id}, class_idx={user_to_class_idx[user.id]}")
                 except Exception as e:
                     logger.error(f"Error processing face encoding for user {user.id}: {e}")
             
@@ -141,7 +162,10 @@ def train_model_task(db: Session = None):
                 
             # Stack features into a single tensor
             features_tensor = torch.cat(user_features, dim=0)
-            labels_tensor = torch.tensor(list(range(len(user_features))), dtype=torch.long)
+            
+            # Create labels tensor using the mapping
+            labels = [user_to_class_idx[uid] for uid in user_ids]
+            labels_tensor = torch.tensor(labels, dtype=torch.long)
             
             logger.info(f"Prepared training data: {features_tensor.shape} features, {labels_tensor.shape} labels")
             
@@ -150,8 +174,8 @@ def train_model_task(db: Session = None):
             dataset = TensorDataset(features_tensor, labels_tensor)
             dataloader = DataLoader(dataset, batch_size=4, shuffle=True)
             
-            # Initialize model with the correct feature dimension
-            num_identities = len(users)
+            # Initialize model with the correct number of identities
+            num_identities = next_class_idx  # Use the next available index as the total count
             
             # Create a model with the correct feature dimension from the start
             logger.info(f"Creating model with {num_identities} identities and feature_dim={feature_dim}")
@@ -196,14 +220,14 @@ def train_model_task(db: Session = None):
             
             logger.info("Training completed, saving model...")
             
-            # Create a mapping from model indices to user IDs
-            idx_to_user = {idx: user_id for idx, user_id in enumerate(user_ids)}
+            # Create mapping from class indices to user IDs
+            idx_to_user = {str(class_idx): user_id for user_id, class_idx in user_to_class_idx.items()}
             
-            # Save the mapping
-            with open(models_dir / "user_id_mapping.json", 'w') as f:
-                json.dump(idx_to_user, f)
-                
-            logger.info(f"Saved user ID mapping with {len(idx_to_user)} entries")
+            # Update global mapping
+            if mapping_service.update_mapping(idx_to_user):
+                logger.info("Successfully updated global mapping")
+            else:
+                logger.warning("Failed to update global mapping")
             
             # Save the model with metadata
             client_id = os.getenv("CLIENT_ID", "client1")
@@ -213,7 +237,9 @@ def train_model_task(db: Session = None):
                 'feature_dim': feature_dim,
                 'privacy_enabled': True,
                 'client_id': client_id,
-                'timestamp': datetime.utcnow().isoformat()
+                'timestamp': datetime.utcnow().isoformat(),
+                'mapping_version': mapping_service.mapping_version,
+                'mapping_hash': mapping_service.mapping_hash
             }
             torch.save(model_metadata, models_dir / f"best_{client_id}_pretrained_model.pth")
             

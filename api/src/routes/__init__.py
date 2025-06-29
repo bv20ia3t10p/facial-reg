@@ -4,7 +4,7 @@ Contains authentication, user management, analytics, and verification endpoints.
 """
 
 from fastapi import APIRouter
-from . import auth, users, analytics, verification, client_users
+from . import auth, users, analytics, verification, client_users, mapping
 
 api_router = APIRouter()
 
@@ -13,3 +13,4 @@ api_router.include_router(users.router, prefix="/users", tags=["users"])
 api_router.include_router(analytics.router, prefix="/analytics", tags=["analytics"])
 api_router.include_router(verification.router, prefix="/verification", tags=["verification"])
 api_router.include_router(client_users.router, prefix="/client-users", tags=["client-users"])
+api_router.include_router(mapping.router, prefix="", tags=["mapping"])  # No prefix as routes have their own

@@ -19,8 +19,9 @@ export function WebcamCapture({ onCapture, isScanning }: WebcamCaptureProps) {
   const [showFaceScan, setShowFaceScan] = useState(false);
   const { isDarkMode } = useTheme();
 
+  // Set video constraints to maintain aspect ratio
   const videoConstraints = {
-    width: 1280,
+    width: 720,
     height: 720,
     facingMode: "user"
   };
@@ -48,7 +49,32 @@ export function WebcamCapture({ onCapture, isScanning }: WebcamCaptureProps) {
     }
   }, [isCameraReady, isScanning]);
 
-  const capture = useCallback(() => {
+  const cropToSquare = (imageSrc: string): Promise<string> => {
+    return new Promise((resolve, reject) => {
+      const img = new Image();
+      img.onload = () => {
+        const canvas = document.createElement('canvas');
+        canvas.width = 224;
+        canvas.height = 224;
+        const ctx = canvas.getContext('2d');
+        
+        if (!ctx) {
+          reject(new Error('Failed to get canvas context'));
+          return;
+        }
+
+        // Draw the image at 224x224
+        ctx.drawImage(img, 0, 0, 224, 224);
+
+        // Convert to base64
+        resolve(canvas.toDataURL('image/jpeg', 0.9));
+      };
+      img.onerror = () => reject(new Error('Failed to load image'));
+      img.src = imageSrc;
+    });
+  };
+
+  const capture = useCallback(async () => {
     if (!webcamRef.current) {
       const err = 'Webcam not initialized';
       console.error(err);
@@ -57,24 +83,24 @@ export function WebcamCapture({ onCapture, isScanning }: WebcamCaptureProps) {
     }
 
     try {
+      // Set the webcam screenshot size to match our desired output
+      if (webcamRef.current.video) {
+        webcamRef.current.video.width = 224;
+        webcamRef.current.video.height = 224;
+      }
+
       const imageSrc = webcamRef.current.getScreenshot();
       if (imageSrc) {
-        // Debug image data
-        console.log('Image captured successfully');
-        console.log('Image data length:', imageSrc.length);
-        console.log('Image data starts with:', imageSrc.substring(0, 50));
-        console.log('Image format:', imageSrc.split(';')[0]);
+        // Process the image to ensure it's exactly 224x224
+        const processedImage = await cropToSquare(imageSrc);
         
-        // Verify image data is valid base64
         try {
-          const base64Data = imageSrc.split(',')[1];
+          const base64Data = processedImage.split(',')[1];
           atob(base64Data);
-          console.log('Image is valid base64');
           
           // Create a test Blob to verify data
           const byteString = atob(base64Data);
-          const mimeString = imageSrc.split(':')[1].split(';')[0];
-          console.log('MIME type:', mimeString);
+          const mimeString = processedImage.split(':')[1].split(';')[0];
           
           const ab = new ArrayBuffer(byteString.length);
           const ia = new Uint8Array(ab);
@@ -82,14 +108,14 @@ export function WebcamCapture({ onCapture, isScanning }: WebcamCaptureProps) {
             ia[i] = byteString.charCodeAt(i);
           }
           const blob = new Blob([ab], { type: mimeString });
-          console.log('Successfully created Blob:', blob.size, 'bytes');
+          console.log('Captured image size:', blob.size, 'bytes');
         } catch (e) {
           console.error('Invalid base64 data:', e);
           setError('Invalid image data format');
           return;
         }
         
-        onCapture(imageSrc);
+        onCapture(processedImage);
         setError(null);
       } else {
         const err = 'Failed to capture image - no data returned';
@@ -105,9 +131,14 @@ export function WebcamCapture({ onCapture, isScanning }: WebcamCaptureProps) {
 
   const handleUserMedia = useCallback(() => {
     console.log('Camera is ready');
-    console.log('Video constraints:', videoConstraints);
     setIsCameraReady(true);
     setError(null);
+
+    // Set initial video size
+    if (webcamRef.current?.video) {
+      webcamRef.current.video.width = 224;
+      webcamRef.current.video.height = 224;
+    }
   }, []);
 
   const handleUserMediaError = useCallback((err: string | DOMException) => {
@@ -117,17 +148,22 @@ export function WebcamCapture({ onCapture, isScanning }: WebcamCaptureProps) {
     setIsCameraReady(false);
   }, []);
 
+  // Container style with square aspect ratio
+  const containerStyle = {
+    width: '100%',
+    maxWidth: '400px',
+    margin: '0 auto',
+    aspectRatio: '1/1',
+    backgroundColor: isDarkMode ? '#1f1f1f' : '#f0f2f5',
+    borderRadius: '12px',
+    overflow: 'hidden',
+    position: 'relative' as const,
+    boxShadow: '0 4px 12px rgba(0, 0, 0, 0.1)',
+    border: `1px solid ${isDarkMode ? '#333' : '#e0e0e0'}`,
+  };
+
   return (
-    <div style={{
-      width: '100%',
-      aspectRatio: '16/9',
-      backgroundColor: isDarkMode ? '#1f1f1f' : '#f0f2f5',
-      borderRadius: '12px',
-      overflow: 'hidden',
-      position: 'relative',
-      boxShadow: '0 4px 12px rgba(0, 0, 0, 0.1)',
-      border: `1px solid ${isDarkMode ? '#333' : '#e0e0e0'}`,
-    }}>
+    <div style={containerStyle}>
       <Webcam
         audio={false}
         ref={webcamRef}
@@ -146,24 +182,26 @@ export function WebcamCapture({ onCapture, isScanning }: WebcamCaptureProps) {
       {isCameraReady && !isScanning && showFaceScan && (
         <div style={{
           position: 'absolute',
-          top: 0,
-          left: 0,
-          right: 0,
-          bottom: 0,
+          top: '0',
+          left: '0',
+          right: '0',
+          bottom: '0',
           display: 'flex',
           alignItems: 'center',
           justifyContent: 'center',
           pointerEvents: 'none',
+          zIndex: 2,
         }}>
+          {/* Scanning animation */}
           <div style={{
-            width: '280px',
-            height: '280px',
-            borderRadius: '50%',
+            width: '100%',
+            height: '100%',
             border: '2px solid #1DA1F2',
             animation: 'pulse 2s infinite',
             position: 'relative',
+            borderRadius: '8px',
           }}>
-            {/* Scanning lines */}
+            {/* Scanning line */}
             <div style={{
               position: 'absolute',
               top: '0',
@@ -174,27 +212,6 @@ export function WebcamCapture({ onCapture, isScanning }: WebcamCaptureProps) {
               animation: 'scanLine 2s linear infinite',
               opacity: 0.7,
             }} />
-            
-            {/* Corner markers */}
-            {[
-              { top: '-5px', left: '-5px' },
-              { top: '-5px', right: '-5px' },
-              { bottom: '-5px', left: '-5px' },
-              { bottom: '-5px', right: '-5px' },
-            ].map((pos, idx) => (
-              <div 
-                key={idx}
-                style={{
-                  position: 'absolute',
-                  width: '20px',
-                  height: '20px',
-                  border: '2px solid #1DA1F2',
-                  borderRadius: '50%',
-                  background: 'rgba(29, 161, 242, 0.2)',
-                  ...pos
-                }}
-              />
-            ))}
           </div>
         </div>
       )}
@@ -214,11 +231,13 @@ export function WebcamCapture({ onCapture, isScanning }: WebcamCaptureProps) {
           gap: '4px',
           fontSize: '14px',
           boxShadow: '0 2px 8px rgba(0, 0, 0, 0.15)',
+          zIndex: 3,
         }}>
           <CheckOutlined /> Face Detected
         </div>
       )}
       
+      {/* Loading overlay */}
       {isScanning && (
         <div style={{
           position: 'absolute',
@@ -231,11 +250,13 @@ export function WebcamCapture({ onCapture, isScanning }: WebcamCaptureProps) {
           justifyContent: 'center',
           backgroundColor: 'rgba(0, 0, 0, 0.5)',
           backdropFilter: 'blur(4px)',
+          zIndex: 4,
         }}>
           <Spin indicator={<LoadingOutlined style={{ fontSize: 48, color: '#1DA1F2' }} spin />} />
         </div>
       )}
 
+      {/* Camera initialization state */}
       {!isCameraReady && (
         <div style={{
           position: 'absolute',
@@ -247,6 +268,7 @@ export function WebcamCapture({ onCapture, isScanning }: WebcamCaptureProps) {
           background: isDarkMode ? 'rgba(0, 0, 0, 0.7)' : 'rgba(255, 255, 255, 0.9)',
           borderRadius: '12px',
           boxShadow: '0 4px 12px rgba(0, 0, 0, 0.15)',
+          zIndex: 5,
         }}>
           <CameraOutlined style={{ fontSize: 48, color: '#8c8c8c' }} />
           <Text type="secondary" style={{ display: 'block', marginTop: '8px' }}>
@@ -255,6 +277,7 @@ export function WebcamCapture({ onCapture, isScanning }: WebcamCaptureProps) {
         </div>
       )}
 
+      {/* Capture button */}
       {isCameraReady && !isScanning && (
         <div style={{
           position: 'absolute',
@@ -264,6 +287,7 @@ export function WebcamCapture({ onCapture, isScanning }: WebcamCaptureProps) {
           display: 'flex',
           flexDirection: 'column',
           alignItems: 'center',
+          zIndex: 6,
         }}>
           <Button
             type="primary"
@@ -297,12 +321,12 @@ export function WebcamCapture({ onCapture, isScanning }: WebcamCaptureProps) {
         </div>
       )}
 
-      {/* Add CSS animations */}
+      {/* CSS animations */}
       <style>
         {`
         @keyframes pulse {
           0% {
-            transform: scale(0.95);
+            transform: scale(0.98);
             box-shadow: 0 0 0 0 rgba(29, 161, 242, 0.7);
           }
           
@@ -312,7 +336,7 @@ export function WebcamCapture({ onCapture, isScanning }: WebcamCaptureProps) {
           }
           
           100% {
-            transform: scale(0.95);
+            transform: scale(0.98);
             box-shadow: 0 0 0 0 rgba(29, 161, 242, 0);
           }
         }

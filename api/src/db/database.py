@@ -2,7 +2,7 @@
 Database initialization and models for the biometric authentication system
 """
 
-from sqlalchemy import create_engine, Column, String, Float, DateTime, Boolean, ForeignKey, JSON, LargeBinary
+from sqlalchemy import create_engine, Column, Integer, String, Float, DateTime, Boolean, Text, ForeignKey, JSON, LargeBinary
 from sqlalchemy.orm import foreign
 from sqlalchemy.ext.declarative import declarative_base
 from sqlalchemy.orm import sessionmaker, relationship, Session
@@ -10,11 +10,12 @@ from sqlalchemy import text
 import uuid
 from datetime import datetime
 import logging
-from typing import Optional, Any, Dict
+from typing import Optional, Any, Dict, Generator
 import os
 from fastapi import HTTPException, status, Depends
 from pathlib import Path
 import json
+from ..utils.datetime_utils import get_current_time, UTC_PLUS_7
 
 from ..utils.common import generate_uuid, generate_auth_log_id
 
@@ -88,14 +89,11 @@ engine = create_engine(
     DATABASE_URL,
     connect_args={
         "check_same_thread": False,
-        "timeout": 30,
-        "uri": True
+        "timeout": 30  # Keep a reasonable timeout
     } if DATABASE_URL.startswith("sqlite") else {},
-    echo=True,
+    echo=False,      # Set to False to reduce log noise
     pool_pre_ping=True,
-    pool_recycle=3600,
-    pool_size=20,
-    max_overflow=10
+    pool_recycle=1800  # 30 minutes
 )
 
 # Create session factory
@@ -113,15 +111,15 @@ class User(Base):
     """User model for storing biometric authentication data"""
     __tablename__ = "users"
     
-    id = Column(String, primary_key=True, default=generate_uuid)
+    id = Column(String, primary_key=True, index=True)
     name = Column(String, nullable=False)
-    email = Column(String, unique=True, nullable=False)
+    email = Column(String, unique=True, nullable=False, index=True)
     department = Column(String, nullable=False)
     role = Column(String, nullable=False)
     password_hash = Column(String, nullable=False)
-    face_encoding = Column(LargeBinary)  # Encrypted face recognition data
-    created_at = Column(DateTime, default=datetime.utcnow)
-    last_authenticated = Column(DateTime)
+    face_encoding = Column(LargeBinary)
+    created_at = Column(DateTime(timezone=True), nullable=False, default=get_current_time)
+    last_authenticated = Column(DateTime(timezone=True))
     
     # Relationships
     auth_logs = relationship(
@@ -137,12 +135,12 @@ class AuthenticationLog(Base):
     __tablename__ = "authentication_logs"
     
     id = Column(String, primary_key=True)
-    user_id = Column(String, nullable=False)
+    user_id = Column(Integer, ForeignKey("users.id"))
     confidence = Column(Float, nullable=False)
     success = Column(Boolean, nullable=False)
     threshold = Column(Float, nullable=True)  # Add threshold field
     emotion_data = Column(JSON)
-    created_at = Column(DateTime, default=datetime.utcnow)
+    created_at = Column(DateTime(timezone=True), default=get_current_time)
     device_info = Column(String)
     captured_image = Column(String)  # Path to stored image
     authenticated_at = Column(DateTime, nullable=True)  # Add authenticated_at field
@@ -151,15 +149,12 @@ class VerificationRequest(Base):
     """Model for verification requests"""
     __tablename__ = "verification_requests"
     
-    id = Column(String, primary_key=True, default=generate_uuid)
-    user_id = Column(String, ForeignKey("users.id"))
-    reason = Column(String, nullable=False)
-    additional_notes = Column(String)
-    captured_image = Column(String)  # Base64 encoded image
-    confidence = Column(Float)
-    status = Column(String, default="pending")  # pending, approved, rejected
-    created_at = Column(DateTime, default=datetime.utcnow)
-    processed_at = Column(DateTime)
+    id = Column(Integer, primary_key=True, index=True)
+    user_id = Column(Integer, ForeignKey("users.id"))
+    status = Column(String)  # pending, approved, rejected
+    created_at = Column(DateTime(timezone=True), default=get_current_time)
+    processed_at = Column(DateTime(timezone=True), nullable=True)
+    request_data = Column(Text)  # JSON string of request data
     
     # Relationships
     user = relationship("User", back_populates="verification_requests")
@@ -171,13 +166,13 @@ class Client(Base):
     id = Column(String, primary_key=True, default=generate_uuid)
     name = Column(String, nullable=False)
     client_type = Column(String, nullable=False)  # 'client1', 'client2', 'server'
-    created_at = Column(DateTime, default=datetime.utcnow)
+    created_at = Column(DateTime(timezone=True), default=get_current_time)
     last_update = Column(DateTime)
     model_version = Column(String)
     privacy_budget = Column(Float, default=1.0)
     metrics = Column(JSON)  # Stores training metrics
 
-def get_db():
+def get_db() -> Generator[Session, None, None]:
     """Get database session with connection testing and proper cleanup"""
     session_id = str(uuid.uuid4())[:8]  # Generate short session ID for logging
     db = None
@@ -186,23 +181,47 @@ def get_db():
         db = SessionLocal()
         
         # Test connection with a simple query
-        logger.debug(f"[Session {session_id}] Testing database connection")
-        result = db.execute(text("SELECT 1"))
-        if not result.fetchone():
-            logger.error(f"[Session {session_id}] Database connection test failed")
-            raise Exception("Database connection test failed")
+        try:
+            result = db.execute(text("SELECT 1"))
+            if not result.fetchone():
+                logger.error(f"[Session {session_id}] Database connection test failed")
+                raise Exception("Database connection test failed")
+                logger.info(f"[Session {session_id}] Database connection test successful")
+        except Exception as conn_err:
+            # Log the specific connection error
+            logger.error(f"[Session {session_id}] Database connection error: {conn_err}", exc_info=True)
+            
+            # Try to reconnect to the database with a fresh engine
+            if DATABASE_URL.startswith("sqlite"):
+                # For SQLite, check if database file exists and is accessible
+                db_path = DATABASE_URL.replace('sqlite:///', '')
+                if not os.path.exists(os.path.dirname(db_path)):
+                    os.makedirs(os.path.dirname(db_path), exist_ok=True)
+                logger.info(f"[Session {session_id}] Ensuring SQLite database path exists: {db_path}")
+            
+            # Close the session and try to create a new one
+            if db:
+                try:
+                    db.close()
+                except:
+                    pass
+            db = SessionLocal()
+            # Test again
+            result = db.execute(text("SELECT 1"))
+            if not result.fetchone():
+                raise Exception("Database reconnection test failed")
+            logger.info(f"[Session {session_id}] Database reconnection successful")
         
-        logger.info(f"[Session {session_id}] Database connection test successful")
         yield db
         
     except Exception as e:
-        logger.error(f"[Session {session_id}] Failed to create database session: {e}")
+        logger.error(f"[Session {session_id}] Failed to create database session: {str(e)}", exc_info=True)
         if db:
             try:
                 logger.debug(f"[Session {session_id}] Rolling back failed session")
                 db.rollback()
             except Exception as close_error:
-                logger.error(f"[Session {session_id}] Error rolling back failed session: {close_error}")
+                logger.error(f"[Session {session_id}] Error rolling back failed session: {close_error}", exc_info=True)
         raise
         
     finally:
@@ -212,7 +231,7 @@ def get_db():
                 db.close()
                 logger.info(f"=== Closed database session {session_id} ===")
             except Exception as e:
-                logger.error(f"[Session {session_id}] Error closing database session: {e}")
+                logger.error(f"[Session {session_id}] Error closing database session: {e}", exc_info=True)
 
 def init_db():
     """Initialize database and create tables"""

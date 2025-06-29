@@ -10,16 +10,22 @@ import logging
 from typing import Dict, Any, Optional, Union
 import numpy as np
 import os
+from pathlib import Path
 
 logger = logging.getLogger(__name__)
+
+# Suppress specific Opacus validator info messages
+logging.getLogger('opacus.validators.batch_norm').setLevel(logging.WARNING)
+logging.getLogger('opacus.validators.module_validator').setLevel(logging.WARNING)
 
 class PrivacyEngine:
     """Privacy Engine implementing DP and HE for biometric data"""
     
     def __init__(self):
+        """Initialize privacy engine"""
         self.dp_engine = None
-        self.context = None  # HE context
-        self._context_initialized = False
+        self.he_context = None
+        self.initialized = False
         
         # Get privacy parameters from environment
         self.epsilon = float(os.getenv('MAX_DP_EPSILON', '100.0'))
@@ -33,31 +39,55 @@ class PrivacyEngine:
         logger.info(f"Privacy parameters: epsilon={self.epsilon}, delta={self.delta}, "
                    f"max_grad_norm={self.max_grad_norm}, noise_multiplier={self.noise_multiplier}")
     
+    def _create_new_context(self) -> ts.Context:
+        """Create a new HE context"""
+        context = ts.context(
+            ts.SCHEME_TYPE.CKKS,
+            poly_modulus_degree=8192,
+            coeff_mod_bit_sizes=[60, 40, 40, 60]
+        )
+        context.global_scale = 2**40
+        return context
+    
     async def initialize(self):
         """Initialize privacy components"""
-        logger.info("Initializing Privacy Engine...")
-        
-        # Initialize new HE context
         try:
-            # Create TenSEAL context for homomorphic encryption
-            self.context = ts.context(
-                ts.SCHEME_TYPE.CKKS,
-                poly_modulus_degree=8192,
-                coeff_mod_bit_sizes=[60, 40, 40, 60]
-            )
-            self.context.global_scale = 2**40
-            self.context.generate_galois_keys()
+            # Create HE context if not exists
+            context_path = Path("/app/api/data/he_context.pkl")
+            context_loaded = False
             
-            self._context_initialized = True
-            logger.info("✓ Created new HE context")
+            if context_path.exists():
+                try:
+                    with open(context_path, 'rb') as f:
+                        # Use TenSEAL's load_context instead of pickle
+                        serialized_context = f.read()
+                        self.he_context = ts.Context.load(serialized_context)
+                    logger.info("✓ Loaded existing HE context")
+                    context_loaded = True
+                except (EOFError, Exception) as e:
+                    logger.warning(f"Failed to load existing HE context: {e}. Will create new one.")
+            
+            if not context_loaded:
+                # Create new context
+                self.he_context = self._create_new_context()
+                
+                # Save context using TenSEAL's serialization
+                context_path.parent.mkdir(parents=True, exist_ok=True)
+                with open(context_path, 'wb') as f:
+                    # Use TenSEAL's serialize instead of pickle
+                    serialized_context = self.he_context.serialize()
+                    f.write(serialized_context)
+                logger.info("✓ Created and saved new HE context")
+            
+            self.initialized = True
+            
         except Exception as e:
-            logger.warning(f"Failed to initialize HE context: {e}, proceeding without encryption")
-            self.context = None
-            self._context_initialized = False
+            logger.error(f"Failed to initialize privacy engine: {e}")
+            raise
     
     def _ensure_context(self) -> bool:
         """Ensure HE context is initialized"""
-        if not self._context_initialized or self.context is None:
+        if not self.initialized or self.he_context is None:
             logger.warning("HE context not initialized")
             return False
         return True
@@ -73,7 +103,7 @@ class PrivacyEngine:
             features_np = features.detach().cpu().numpy().flatten()
             
             # Encrypt using CKKS
-            encrypted = ts.ckks_tensor(self.context, features_np)
+            encrypted = ts.ckks_tensor(self.he_context, features_np)
             return encrypted
         except Exception as e:
             logger.warning(f"Encryption failed: {e}, using raw features")
@@ -179,9 +209,9 @@ class PrivacyEngine:
         """Get current status of privacy components"""
         return {
             "homomorphic_encryption": {
-                "active": self.context is not None,
+                "active": self.he_context is not None,
                 "scheme": "CKKS",
-                "poly_modulus_degree": 8192 if self.context else None
+                "poly_modulus_degree": 8192 if self.he_context else None
             },
             "differential_privacy": {
                 "active": self.dp_engine is not None,

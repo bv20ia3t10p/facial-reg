@@ -86,10 +86,10 @@ def get_password_hash(password: str) -> str:
         logger.error(f"Password hashing failed: {e}")
         raise
 
-def verify_password(plain_password: str, hashed_password: str) -> bool:
-    """Verify a password against its hash"""
+def verify_password(plain_password: str, password_hash: str) -> bool:
+    """Verify a password against a hash"""
     try:
-        return pwd_context.verify(plain_password, hashed_password)
+        return pwd_context.verify(plain_password, password_hash)
     except Exception as e:
         logger.error(f"Password verification failed: {e}")
         return False

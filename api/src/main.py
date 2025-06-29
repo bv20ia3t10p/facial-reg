@@ -12,6 +12,18 @@ import uvicorn
 from datetime import datetime
 import os
 from pathlib import Path
+import sys
+
+# Configure logging
+logging.basicConfig(
+    level=logging.INFO,
+    format='%(asctime)s - %(name)s - %(levelname)s - %(message)s'
+)
+# Suppress Opacus validator info messages
+logging.getLogger('opacus.validators.module_validator').setLevel(logging.WARNING)
+logging.getLogger('opacus.validators.batch_norm').setLevel(logging.WARNING)
+
+logger = logging.getLogger(__name__)
 
 # Import routes
 from .routes import api_router
@@ -22,16 +34,10 @@ from .federated_integration import get_federated_integration, initialize_federat
 from .db.database import init_db
 from .db.migrate import migrate_database
 from .services.service_init import initialize_services
+from .routes.mapping import MappingUpdateRequest  # Import the request model
 
 # Import federated learning components
 from .federated_client import FederatedClient
-
-# Configure logging
-logging.basicConfig(
-    level=logging.INFO,
-    format='%(asctime)s - %(name)s - %(levelname)s - %(message)s'
-)
-logger = logging.getLogger(__name__)
 
 # Initialize FastAPI app
 app = FastAPI(
@@ -39,6 +45,10 @@ app = FastAPI(
     description="Privacy-Preserving Biometric Authentication API with FL, HE, and DP",
     version="1.0.0"
 )
+
+# Get node type from environment
+node_type = os.getenv('NODE_TYPE', 'coordinator').lower()
+logger.info(f"Starting as {node_type} node")
 
 # Configure CORS
 app.add_middleware(
@@ -64,26 +74,34 @@ federated_client = None
 
 @app.on_event("startup")
 async def startup():
-    """Initialize components on startup"""
-    global federated_client
+    """Initialize API components on startup"""
+    logger.info("Starting API initialization...")
     
-    logger.info("Initializing API components...")
-    
-    # Create necessary directories
-    for path in ["data", "models", "logs"]:
-        Path(path).mkdir(parents=True, exist_ok=True)
-    
-    # Initialize components
+    # Initialize database and privacy components first
     init_db()
     await privacy_engine.initialize()
     await federated_manager.initialize()
     await migrate_database()
     
-    # Initialize services
-    initialize_services()
+    # Check if services are already initialized
+    from .services.service_init import _services_initialized, biometric_service, initialize_services
+    if not _services_initialized:
+        try:
+            logger.info("Initializing services...")
+            if not initialize_services():
+                raise RuntimeError("Service initialization failed")
+            
+            # Check if biometric service is available
+            if biometric_service is None:
+                logger.error("CRITICAL ERROR: Biometric service failed to initialize")
+                raise RuntimeError("Biometric service initialization failed")
+        except Exception as e:
+            logger.error(f"Failed to initialize services: {e}", exc_info=True)
+            raise
+    else:
+        logger.info("Services already initialized, skipping initialization")
     
     # Initialize federated client if this is a client node
-    node_type = os.getenv("NODE_TYPE", "").lower()
     if node_type == "client":
         logger.info("Initializing federated learning client...")
         federated_client = FederatedClient()
@@ -129,6 +147,115 @@ async def health_check():
         "federated_learning": await federated_manager.get_status(),
         "federated_client": federated_status
     }
+
+# Direct mapping endpoint to handle /api/mapping requests
+@app.get("/api/mapping")
+async def direct_mapping():
+    """
+    Direct mapping endpoint to handle /api/mapping requests
+    This is a workaround for routing issues
+    """
+    logger.info("Direct mapping endpoint called")
+    try:
+        # Import the get_current_mapping function from mapping.py
+        from .routes.mapping import get_current_mapping
+        
+        # Get the mapping
+        mapping = get_current_mapping()
+        
+        return {
+            "success": True,
+            "mapping": mapping,
+            "count": len(mapping)
+        }
+    except Exception as e:
+        logger.error(f"Error in direct mapping endpoint: {e}")
+        return {"success": False, "error": str(e)}
+
+# Direct mapping update endpoint
+@app.post("/api/mapping/update")
+async def direct_mapping_update(request: MappingUpdateRequest):
+    """
+    Direct mapping update endpoint to handle /api/mapping/update requests
+    This is a workaround for routing issues
+    """
+    logger.info("Direct mapping update endpoint called")
+    try:
+        # Import the necessary functions and models from mapping.py
+        from .routes.mapping import get_current_mapping, save_mapping
+        
+        # Get current mapping
+        current_mapping = get_current_mapping()
+        
+        # Check if update is needed
+        if not request.force_update and current_mapping:
+            current_classes = list(current_mapping.values())
+            if current_classes == request.classes:
+                return {
+                    "success": True,
+                    "message": "Mapping unchanged - already matches requested classes",
+                    "mapping": current_mapping,
+                    "count": len(current_mapping)
+                }
+        
+        # Create new mapping from provided classes
+        new_mapping = {str(idx): class_id for idx, class_id in enumerate(request.classes)}
+        
+        # Save the new mapping
+        if save_mapping(new_mapping):
+            logger.info(f"Global mapping updated with {len(new_mapping)} classes")
+            
+            # Return the new mapping
+            return {
+                "success": True,
+                "message": "Global mapping updated successfully",
+                "mapping": new_mapping,
+                "count": len(new_mapping)
+            }
+        else:
+            return {
+                "success": False, 
+                "message": "Failed to save global mapping"
+            }
+            
+    except Exception as e:
+        logger.error(f"Error updating global mapping: {e}")
+        return {"success": False, "message": f"Failed to update global mapping: {str(e)}"}
+
+# Direct mapping debug endpoint
+@app.get("/api/mapping/debug")
+async def direct_mapping_debug():
+    """
+    Direct mapping debug endpoint to handle /api/mapping/debug requests
+    This is a workaround for routing issues
+    """
+    logger.info("Direct mapping debug endpoint called")
+    try:
+        # Import the necessary functions from mapping.py
+        from .routes.mapping import get_current_mapping, GLOBAL_MAPPING_PATH, _global_mapping_cache
+        
+        # Check if mapping file exists
+        file_exists = GLOBAL_MAPPING_PATH.exists()
+        file_size = GLOBAL_MAPPING_PATH.stat().st_size if file_exists else 0
+        
+        # Get current mapping
+        mapping = get_current_mapping()
+        
+        # Get sample entries
+        sample = {k: mapping[k] for k in list(mapping.keys())[:5]} if mapping else {}
+        
+        return {
+            "success": True,
+            "file_exists": file_exists,
+            "file_path": str(GLOBAL_MAPPING_PATH),
+            "file_size": file_size,
+            "mapping_count": len(mapping),
+            "cache_active": _global_mapping_cache is not None,
+            "sample_entries": sample
+        }
+    except Exception as e:
+        logger.error(f"Error in debug mapping: {e}")
+        return {"success": False, "error": str(e)}
 
 @app.post("/api/model/reload")
 async def reload_model():

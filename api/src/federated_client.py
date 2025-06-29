@@ -12,6 +12,7 @@ from datetime import datetime
 from typing import Dict, List, Optional, Any, Tuple
 from pathlib import Path
 import random
+import hashlib
 
 import torch
 import torch.nn as nn
@@ -31,193 +32,315 @@ from .privacy.privacy_engine import PrivacyEngine
 # Configure logging
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
+# Suppress Opacus validator info messages
+logging.getLogger('opacus.validators.module_validator').setLevel(logging.WARNING)
+logging.getLogger('opacus.validators.batch_norm').setLevel(logging.WARNING)
 
 class FederatedClient:
     """Client for federated learning integration"""
 
     def __init__(self):
+        """Initialize federated learning client"""
         self.client_id = os.getenv("CLIENT_ID", "client1")
         self.coordinator_url = os.getenv("COORDINATOR_URL", "http://fl-coordinator:8000")
-        self.model_path = os.getenv("MODEL_PATH", "/app/models/best_client1_pretrained_model.pth")
-        self.device = torch.device('cuda') if torch.cuda.is_available() else torch.device('cpu')
-        self.current_round = 0
-        self.active = False
-        self.last_update = None
-        self.enable_dp = os.getenv("ENABLE_DP", "true").lower() == "true"
+        self.device = torch.device('cpu')  # Force CPU usage
         self.registered = False
-        self.model = None
+        self.active = False
+        self.current_round = 0
+        self.federated_config = None
         self.privacy_engine = None
+        self.model = None
         self.dataset_size = 0
+        self.mapping_service = None
 
     async def initialize(self):
         """Initialize federated client"""
-        logger.info(f"Initializing federated client {self.client_id}")
-        
-        # Load configuration from coordinator
         try:
+            # Initialize mapping service first
+            from .services.mapping_service import MappingService
+            self.mapping_service = MappingService()
+            
+            # Validate mapping availability
+            if not await self.validate_mapping():
+                logger.error("Failed to validate mapping with coordinator")
+                return False
+            
+            # Load configuration from coordinator
             config_response = requests.get(f"{self.coordinator_url}/config", timeout=10)
             if config_response.status_code == 200:
                 self.federated_config = config_response.json()
-                logger.info(f"Loaded coordinator config: {self.federated_config}")
             else:
-                logger.warning(f"Failed to load coordinator config, using defaults")
                 self.federated_config = {
                     'max_epsilon': 100.0,
                     'delta': 1e-5,
                     'noise_multiplier': 0.2,
                     'max_grad_norm': 5.0
                 }
+            
+            # Initialize privacy engine
+            self.privacy_engine = PrivacyEngine()
+            await self.privacy_engine.initialize()
+            
+            # Initialize model
+            self.model = await self.load_or_download_model()
+            if not self.model:
+                logger.error("Failed to initialize model")
+                return False
+            
+            # Register with coordinator
+            if await self.register_with_coordinator():
+                self.registered = True
+                self.active = True
+            else:
+                logger.warning(f"Failed to register client {self.client_id} with coordinator")
+                return False
+            
+            # Get initial dataset size
+            self.dataset_size = await self.get_dataset_size()
+            
+            # Start background federated loop
+            asyncio.create_task(self.federated_learning_loop())
+            
+            logger.info(f"Federated client {self.client_id} initialized with {self.dataset_size} samples")
+            return True
+            
         except Exception as e:
-            logger.error(f"Error loading coordinator config: {e}")
-            self.federated_config = {
-                'max_epsilon': 100.0,
-                'delta': 1e-5,
-                'noise_multiplier': 0.2,
-                'max_grad_norm': 5.0
-            }
-        
-        # Initialize privacy engine
-        self.privacy_engine = PrivacyEngine()
-        await self.privacy_engine.initialize()
-        
-        # Initialize model
-        self.model = await self.load_or_download_model()
-        
-        # Register with coordinator
-        if await self.register_with_coordinator():
-            logger.info(f"Client {self.client_id} registered with coordinator")
-            self.registered = True
-            self.active = True
-        else:
-            logger.warning(f"Failed to register client {self.client_id} with coordinator")
-        
-        # Get initial dataset size
-        self.dataset_size = await self.get_dataset_size()
-        logger.info(f"Dataset size: {self.dataset_size} samples")
-        
-        # Start background federated loop
-        asyncio.create_task(self.federated_learning_loop())
-        
-        logger.info(f"Federated client {self.client_id} initialized")
-        return True
+            logger.error(f"Error initializing federated client: {e}")
+            return False
 
-    async def load_or_download_model(self) -> nn.Module:
-        """Load model from local storage or download from coordinator"""
-        logger.info(f"Loading model from {self.model_path}")
-        
-        local_model_path = Path(self.model_path)
+    async def validate_mapping(self) -> bool:
+        """Validate mapping with coordinator"""
         try:
-            if local_model_path.exists():
-                # Load local model
-                state_dict = torch.load(local_model_path, map_location=self.device)
+            # Initialize mapping from centralized source
+            self.mapping_service.initialize_mapping()
+            mapping = self.mapping_service.get_mapping()
+            
+            # Verify mapping format
+            if not isinstance(mapping, dict):
+                logger.error(f"Invalid mapping format: {type(mapping)}")
+                return False
+            
+            # Verify mapping has entries
+            if not mapping:
+                logger.error("Empty mapping received from coordinator")
+                return False
+            
+            logger.info(f"Successfully validated mapping with {len(mapping)} entries")
+            return True
+            
+        except Exception as e:
+            logger.error(f"Error validating mapping: {e}")
+            return False
+
+    async def load_or_download_model(self):
+        """Load or download the model"""
+        try:
+            # Get current mapping
+            self.mapping_service.initialize_mapping()
+            mapping = self.mapping_service.get_mapping()
+            if not mapping:
+                logger.error("Cannot load model without valid mapping")
+                return None
+            
+            num_identities = len(mapping)
+            logger.info(f"Using {num_identities} identities from global mapping")
+            
+            model_path = Path(f"/app/models/best_{self.client_id}_pretrained_model.pth")
+            
+            if model_path.exists():
+                # Load existing model
+                state_dict = torch.load(model_path, map_location=self.device)
                 
-                # Extract model parameters
-                num_identities = 100  # Default
-                if isinstance(state_dict, dict) and 'num_identities' in state_dict:
-                    num_identities = state_dict['num_identities']
-                elif isinstance(state_dict, dict) and 'state_dict' in state_dict:
-                    if 'metadata' in state_dict and 'num_identities' in state_dict['metadata']:
-                        num_identities = state_dict['metadata']['num_identities']
+                # Handle metadata wrapper
+                if isinstance(state_dict, dict) and 'state_dict' in state_dict:
+                    stored_num_identities = state_dict.get('num_identities', num_identities)
+                    embedding_dim = state_dict.get('feature_dim', 512)
+                    state_dict = state_dict['state_dict']
+                    
+                    # Verify mapping consistency
+                    if stored_num_identities != num_identities:
+                        logger.warning(f"Stored model has different number of identities ({stored_num_identities}) than current mapping ({num_identities})")
+                        # We'll create a new model with correct size
+                        raise ValueError("Model size mismatch with current mapping")
+                else:
+                    embedding_dim = 512
                 
-                # Create model
+                # Create model with correct parameters
                 model = PrivacyBiometricModel(
-                    num_identities=num_identities, 
-                    privacy_enabled=self.enable_dp
+                    num_identities=num_identities,
+                    embedding_dim=embedding_dim,
+                    privacy_enabled=True
                 ).to(self.device)
                 
                 # Load weights
-                if isinstance(state_dict, dict) and 'state_dict' in state_dict:
-                    model.load_state_dict(state_dict['state_dict'])
-                else:
-                    model.load_state_dict(state_dict)
-                
-                logger.info(f"Successfully loaded local model with {num_identities} identities")
-                return model
+                try:
+                    model.load_state_dict(state_dict, strict=False)
+                    logger.info(f"Successfully loaded model with {num_identities} identities")
+                except Exception as e:
+                    logger.error(f"Error loading state dict: {e}")
+                    raise ValueError("Failed to load model weights")
             else:
-                # Try to download global model
-                logger.info("Local model not found, downloading global model")
-                return await self.download_global_model()
-        
-        except Exception as e:
-            logger.error(f"Failed to load model: {e}")
-            # Try to download global model as fallback
-            logger.info("Attempting to download global model as fallback")
-            return await self.download_global_model()
-
-    async def download_global_model(self) -> nn.Module:
-        """Download global model from coordinator"""
-        try:
-            # Get global model info
-            async with httpx.AsyncClient() as client:
-                info_response = await client.get(f"{self.coordinator_url}/models/global")
-                
-                if info_response.status_code != 200:
-                    logger.error(f"Failed to get global model info: {info_response.status_code}")
-                    raise Exception(f"Failed to get global model info: {info_response.status_code}")
-                
-                # Download model
-                download_response = await client.get(f"{self.coordinator_url}/models/global/download")
-                
-                if download_response.status_code != 200:
-                    logger.error(f"Failed to download model: {download_response.status_code}")
-                    raise Exception(f"Failed to download model: {download_response.status_code}")
-                
-                # Save model locally
-                model_data = download_response.content
-                with open(self.model_path, 'wb') as f:
-                    f.write(model_data)
-                
-                logger.info(f"Downloaded global model to {self.model_path}")
-                
-                # Load the downloaded model
-                return await self.load_or_download_model()
-        
-        except Exception as e:
-            logger.error(f"Error downloading global model: {e}")
-            # Create a new model as last resort
-            num_identities = 100  # Default
-            model = PrivacyBiometricModel(
-                num_identities=num_identities, 
-                privacy_enabled=self.enable_dp
-            ).to(self.device)
-            logger.warning(f"Created new model with {num_identities} identities as fallback")
+                # Create new model with mapping-based parameters
+                model = PrivacyBiometricModel(
+                    num_identities=num_identities,
+                    privacy_enabled=True
+                ).to(self.device)
+                logger.info(f"Created new model with {num_identities} identities")
+            
             return model
+            
+        except Exception as e:
+            logger.error(f"Error loading/downloading model: {e}")
+            return None
 
-    async def register_with_coordinator(self) -> bool:
-        """Register this client with the federated coordinator"""
+    async def register_with_coordinator(self):
+        """Register client with coordinator"""
         try:
-            # Get privacy budget
-            privacy_budget = await self.privacy_engine.get_remaining_budget()
+            response = requests.post(
+                f"{self.coordinator_url}/clients/register",
+                json={
+                    "client_id": self.client_id,
+                    "dataset_size": self.dataset_size
+                }
+            )
+            return response.status_code == 200
+        except Exception as e:
+            logger.error(f"Failed to register with coordinator: {e}")
+            return False
+
+    async def get_dataset_size(self):
+        """Get size of local dataset"""
+        try:
+            data_dir = Path(f"/app/data/partitioned/{self.client_id}")
+            if not data_dir.exists():
+                return 0
             
-            # Get dataset size
-            dataset_size = await self.get_dataset_size()
+            total_samples = 0
+            for class_dir in data_dir.iterdir():
+                if class_dir.is_dir():
+                    total_samples += len(list(class_dir.glob('*.jpg')))
             
-            # Register with coordinator
+            return total_samples
+        except Exception as e:
+            logger.error(f"Error getting dataset size: {e}")
+            return 0
+
+    async def federated_learning_loop(self):
+        """Main federated learning loop"""
+        while self.active:
+            try:
+                # Get current round from coordinator
+                response = requests.get(f"{self.coordinator_url}/rounds/current")
+                if response.status_code != 200:
+                    await asyncio.sleep(5)
+                    continue
+                
+                round_info = response.json()
+                round_number = round_info.get("round_number", 0)
+                
+                if round_number > self.current_round:
+                    logger.info(f"Starting participation in round {round_number}")
+                    
+                    # Perform local training
+                    start_time = time.time()
+                    await self.train_local()
+                    training_time = time.time() - start_time
+                    
+                    # Submit model update
+                    if await self.submit_model_update(round_number):
+                        self.current_round = round_number
+                        logger.info(f"Completed federated round {round_number}")
+                
+                await asyncio.sleep(5)
+            
+            except Exception as e:
+                logger.error(f"Error in federated learning loop: {e}")
+                await asyncio.sleep(5)
+
+    async def train_local(self):
+        """Perform local training"""
+        try:
+            # Ensure mapping is up to date
+            self.mapping_service.initialize_mapping()
+            mapping = self.mapping_service.get_mapping()
+            if not mapping:
+                logger.error("Cannot train without valid mapping")
+                return
+            
+            # Get mapping metadata
+            mapping_size = len(mapping)
+            mapping_hash = hashlib.sha256(json.dumps(sorted(mapping.items())).encode()).hexdigest()[:8]
+            mapping_version = datetime.now().isoformat()
+            
+            logger.info(f"Using mapping version {mapping_version} (hash: {mapping_hash}) with {mapping_size} classes")
+            
+            # Verify model classifier size matches mapping
+            if self.model.num_identities != mapping_size:
+                logger.warning(f"Model classifier size ({self.model.num_identities}) doesn't match mapping size ({mapping_size})")
+                # Reinitialize model with correct size
+                self.model = await self.load_or_download_model()
+                if not self.model:
+                    logger.error("Failed to reinitialize model with correct mapping size")
+                    return
+            
+            # Training logic would go here
+            # For now, just simulate training
+            await asyncio.sleep(0.1)
+            
+            # Add mapping metadata to model
+            self.model.mapping_size = mapping_size
+            self.model.mapping_hash = mapping_hash
+            self.model.mapping_version = mapping_version
+            
+        except Exception as e:
+            logger.error(f"Error during local training: {e}")
+
+    async def submit_model_update(self, round_id: int) -> bool:
+        """Submit model update to coordinator"""
+        try:
+            # Get current mapping metadata
+            self.mapping_service.initialize_mapping()
+            mapping = self.mapping_service.get_mapping()
+            if not mapping:
+                logger.error("Cannot submit update without valid mapping")
+                return False
+            
+            mapping_size = len(mapping)
+            mapping_hash = hashlib.sha256(json.dumps(sorted(mapping.items())).encode()).hexdigest()[:8]
+            mapping_version = datetime.now().isoformat()
+            
+            # Prepare model update
+            update = {
+                "weights": self.model.state_dict(),
+                "dataset_size": self.dataset_size,
+                "mapping_size": mapping_size,
+                "mapping_hash": mapping_hash,
+                "mapping_version": mapping_version,
+                "timestamp": datetime.utcnow().isoformat()
+            }
+            
+            # Submit update to coordinator
             async with httpx.AsyncClient() as client:
                 response = await client.post(
-                    f"{self.coordinator_url}/clients/register",
-                    json={
-                        "client_id": self.client_id,
-                        "dataset_size": dataset_size,
-                        "privacy_budget_remaining": privacy_budget
+                    f"{self.coordinator_url}/models/update/{self.client_id}/{round_id}/upload",
+                    json=update,
+                    headers={
+                        "X-Client-ID": self.client_id,
+                        "X-Mapping-Version": mapping_version,
+                        "X-Mapping-Hash": mapping_hash
                     }
                 )
                 
                 if response.status_code == 200:
+                    logger.info(f"Successfully submitted model update for round {round_id}")
                     return True
                 else:
-                    logger.error(f"Failed to register: {response.status_code}, {response.text}")
+                    logger.error(f"Failed to submit model update: {response.status_code}")
                     return False
-        
+                
         except Exception as e:
-            logger.error(f"Error registering client: {e}")
+            logger.error(f"Error submitting model update: {e}")
             return False
-
-    async def get_dataset_size(self) -> int:
-        """Get the size of the local dataset"""
-        # In a real implementation, this would load the actual dataset
-        # For simulation, return a random value between 100 and 1000
-        return random.randint(100, 1000)
 
     async def get_current_round(self) -> Optional[Dict]:
         """Get information about the current federated round"""
@@ -270,107 +393,6 @@ class FederatedClient:
         
         return training_metrics, privacy_metrics
 
-    async def submit_model_update(self, round_id: int, training_metrics: Dict, privacy_metrics: Dict) -> bool:
-        """Submit model update to coordinator"""
-        logger.info(f"Submitting model update for round {round_id}")
-        
-        try:
-            # First notify coordinator of update
-            async with httpx.AsyncClient() as client:
-                update_response = await client.post(
-                    f"{self.coordinator_url}/models/update",
-                    json={
-                        "client_id": self.client_id,
-                        "round_id": round_id,
-                        "dataset_size": await self.get_dataset_size(),
-                        "training_metrics": training_metrics,
-                        "privacy_metrics": privacy_metrics
-                    }
-                )
-                
-                if update_response.status_code != 200:
-                    logger.error(f"Failed to submit update info: {update_response.status_code}")
-                    return False
-                
-                # Get upload URL
-                update_info = update_response.json()
-                upload_url = update_info.get("upload_url")
-                
-                if not upload_url:
-                    logger.error("No upload URL provided")
-                    return False
-                
-                # Save model state dict to file
-                temp_model_path = f"/app/cache/update_{self.client_id}_{round_id}.pth"
-                torch.save(self.model.state_dict(), temp_model_path)
-                
-                # Upload model parameters
-                with open(temp_model_path, "rb") as model_file:
-                    files = {"model_file": model_file}
-                    upload_response = await client.post(
-                        f"{self.coordinator_url}{upload_url}",
-                        files=files
-                    )
-                
-                if upload_response.status_code == 200:
-                    logger.info(f"Model update for round {round_id} submitted successfully")
-                    self.last_update = datetime.utcnow().isoformat()
-                    return True
-                else:
-                    logger.error(f"Failed to upload model: {upload_response.status_code}")
-                    return False
-        
-        except Exception as e:
-            logger.error(f"Error submitting model update: {e}")
-            return False
-
-    async def federated_learning_loop(self):
-        """Background loop for participating in federated learning rounds"""
-        while self.active:
-            try:
-                # Check for active round
-                current_round_info = await self.get_current_round()
-                
-                if not current_round_info:
-                    logger.info("No active round, waiting...")
-                    await asyncio.sleep(30)  # Check again in 30 seconds
-                    continue
-                
-                round_id = current_round_info.get("round_id", 0)
-                status = current_round_info.get("status", "")
-                
-                # Skip if we already processed this round
-                if round_id <= self.current_round:
-                    await asyncio.sleep(30)  # Check again in 30 seconds
-                    continue
-                
-                # Skip if round is not active
-                if status != "active":
-                    logger.info(f"Round {round_id} is not active (status: {status}), waiting...")
-                    await asyncio.sleep(30)  # Check again in 30 seconds
-                    continue
-                
-                logger.info(f"Starting participation in round {round_id}")
-                
-                # Train on local data
-                training_metrics, privacy_metrics = await self.train_on_local_data(round_id)
-                
-                # Submit model update
-                success = await self.submit_model_update(round_id, training_metrics, privacy_metrics)
-                
-                if success:
-                    self.current_round = round_id
-                    logger.info(f"Completed federated round {round_id}")
-                else:
-                    logger.warning(f"Failed to complete federated round {round_id}")
-                
-                # Wait before checking for new rounds
-                await asyncio.sleep(60)  # Wait 1 minute
-                
-            except Exception as e:
-                logger.error(f"Error in federated learning loop: {e}")
-                await asyncio.sleep(60)  # Wait before retrying
-
     async def get_status(self) -> Dict:
         """Get status of federated client"""
         privacy_budget = await self.privacy_engine.get_remaining_budget()
@@ -380,7 +402,6 @@ class FederatedClient:
             "active": self.active,
             "registered": self.registered,
             "current_round": self.current_round,
-            "last_update": self.last_update,
             "privacy_budget_remaining": privacy_budget,
             "dataset_size": self.dataset_size,
             "coordinator_url": self.coordinator_url

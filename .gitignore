@@ -1,21 +1,82 @@
-# Data and results
+# Data and Model Files
 /data/
-*results*
+/models/
+/cache/
+*.pth
+*.pkl
+*.h5
+*.onnx
+*.pt
+*.bin
+
+# Database and Storage
+/database/*.db
+/database/client*.db
+*.sqlite
+*.sqlite3
+clients.json
+
+# Training Results and Logs
+*results*/
+*history*.json
+/logs/
+*.log
+.monitoring/
+/thesis_statistics*/
+training_statistics*/
+metrics/
+wandb/
+/experiments/
+
+# Debug Files and Outputs
+*debug*.py
+*debug*.json
+*debug*/
+*_debug*/
+diagnose*.py
+
+# Test Files (uncomment if you don't want to track test files)
+# test_*.py
+# *_test.py
 
 # Python
 __pycache__/
-*.pth
-*history.json
+*.py[cod]
+*$py.class
+*.so
+.Python
+build/
+develop-eggs/
+dist/
+downloads/
+eggs/
+.eggs/
+lib/
+lib64/
+parts/
+sdist/
+var/
+wheels/
+*.egg-info/
+.installed.cfg
+*.egg
 
-# Logs
-*.log
-logs/
-.monitoring/
+# Environment
+.env
+.venv
+env/
+venv/
+ENV/
+.python-version
+.env.*
 
-# VSCode and IDEs
+# IDE and Editor Files
 .vscode/
 !.vscode/extensions.json
 .idea/
+*.swp
+*.swo
+*~
 .DS_Store
 *.suo
 *.ntvs*
@@ -23,24 +84,41 @@ logs/
 *.sln
 *.sw?
 
-# Cache
-cache/
-
-# Models
-models/
-
-# Database
-/database/*.db
-
 # Frontend (bioemo-web)
 bioemo-web/node_modules/
+bioemo-web/.pnp
+bioemo-web/.pnp.js
 bioemo-web/dist/
 bioemo-web/dist-ssr/
+bioemo-web/coverage/
 bioemo-web/*.local
-bioemo-web/logs
+bioemo-web/logs/
 bioemo-web/*.log
 bioemo-web/npm-debug.log*
 bioemo-web/yarn-debug.log*
 bioemo-web/yarn-error.log*
 bioemo-web/pnpm-debug.log*
 bioemo-web/lerna-debug.log*
+
+# Temporary and System Files
+*.tmp
+*.temp
+*.bak
+.DS_Store
+Thumbs.db
+
+# Docker
+.docker/
+docker-compose.override.yml
+
+# Federated Learning Specific
+/partitioned/
+/he_context*/
+privacy_metrics/
+*.privacy_log
+federated_weights/
+client_models/
+global_model/
+/privacy_biometrics/
+
+*_statistics_*/

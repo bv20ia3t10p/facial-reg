@@ -26,14 +26,15 @@ import threading
 from .privacy.privacy_engine import PrivacyEngine
 from .utils.security import generate_uuid
 from .db.database import get_db
+from .utils.datetime_utils import get_current_time, get_current_time_str
 
 # Configure logging
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 
 # Create a separate base for federated models to avoid conflicts
-metadata = MetaData()
-FederatedBase = declarative_base(metadata=metadata)
+table_metadata = MetaData()  # Renamed from metadata to avoid conflict
+FederatedBase = declarative_base(metadata=table_metadata)
 
 class FederatedModelVersion(FederatedBase):
     """Track federated model versions"""
@@ -44,10 +45,10 @@ class FederatedModelVersion(FederatedBase):
     round_id = Column(Integer, nullable=False)
     accuracy = Column(Float, nullable=True)
     participants = Column(Integer, nullable=True)
-    created_at = Column(DateTime, default=datetime.utcnow)
+    created_at = Column(DateTime(timezone=True), default=get_current_time)
     is_active = Column(Boolean, default=False)
-    model_path = Column(String(255), nullable=True)
-    model_metadata = Column(Text, nullable=True)  # Renamed from metadata to avoid conflict
+    path = Column(String(255), nullable=True)  # Path to model file
+    model_metadata = Column(Text, nullable=True)  # Model metadata as JSON string
 
 class FederatedIntegration:
     """Handles federated learning integration"""
@@ -91,7 +92,7 @@ class FederatedIntegration:
             "initialized": self._initialized,
             "current_round": self._current_round,
             "status": self._status,
-            "last_update": datetime.utcnow().isoformat()
+            "last_update": get_current_time_str()
         }
     
     def trigger_round(self) -> Dict[str, Any]:
@@ -101,7 +102,7 @@ class FederatedIntegration:
         
         try:
             self._current_round += 1
-            timestamp = datetime.utcnow().isoformat()
+            timestamp = get_current_time_str()
             
             round_info = {
                 "round": self._current_round,
