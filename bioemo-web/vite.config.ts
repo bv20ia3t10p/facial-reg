@@ -1,4 +1,5 @@
 import { defineConfig, loadEnv, ConfigEnv, UserConfig } from 'vite'
+import { resolve } from 'path'
 import react from '@vitejs/plugin-react-swc'
 
 // https://vitejs.dev/config/
@@ -8,6 +9,12 @@ export default defineConfig(({ command, mode }: ConfigEnv): UserConfig => {
   
   return {
   plugins: [react()],
+  // Allow using `@/` as an alias to the project src directory
+  resolve: {
+    alias: {
+      '@': resolve(__dirname, 'src')
+    }
+  },
   server: {
     port: 5174,
     strictPort: true,
