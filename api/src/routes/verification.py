@@ -48,29 +48,35 @@ async def get_verification_requests(
         
         result = []
         for req in requests:
+            # Parse request data from JSON
+            request_details = {}
+            if req.request_data is not None:
+                try:
+                    request_details = json.loads(str(req.request_data))
+                except json.JSONDecodeError:
+                    logger.warning(f"Failed to parse request_data for request {req.id}")
+                    request_details = {}
+            
             # Handle image data - ensure it's a valid string
-            image_data = req.captured_image
-            if image_data:
-                # If it's already a string (base64), use it as is
-                # If it's binary data, encode it to base64
-                if isinstance(image_data, bytes):
-                    try:
-                        # Try to decode as UTF-8 first (in case it's already a string stored as bytes)
-                        image_data = image_data.decode('utf-8')
-                    except UnicodeDecodeError:
-                        # If that fails, it's binary data, so encode to base64
-                        image_data = base64.b64encode(image_data).decode('utf-8')
+            image_data = request_details.get("captured_image")
+            if image_data and isinstance(image_data, bytes):
+                try:
+                    # Try to decode as UTF-8 first (in case it's already a string stored as bytes)
+                    image_data = image_data.decode('utf-8')
+                except UnicodeDecodeError:
+                    # If that fails, it's binary data, so encode to base64
+                    image_data = base64.b64encode(image_data).decode('utf-8')
             
             result.append({
                 "id": str(req.id),
                 "employeeId": str(req.user_id),
-                "reason": req.reason,
-                "additionalNotes": req.additional_notes,
+                "reason": request_details.get("reason", ""),
+                "additionalNotes": request_details.get("additional_notes", ""),
                 "capturedImage": image_data,
-                "confidence": req.confidence,
+                "confidence": request_details.get("confidence", 0.0),
                 "status": req.status,
                 "submittedAt": req.created_at.isoformat(),
-                "processedAt": req.processed_at.isoformat() if req.processed_at else None,
+                "processedAt": req.processed_at.isoformat() if req.processed_at is not None else None,
                 "user": {
                     "id": str(req.user.id),
                     "name": req.user.name,
@@ -101,13 +107,18 @@ async def create_verification_request_endpoint(
         image_data = await image.read()
         
         # Create verification request
+        # Store all request details as JSON in request_data column
+        request_details = {
+            "reason": reason,
+            "additional_notes": additional_notes,
+            "captured_image": base64.b64encode(image_data).decode('utf-8'),
+            "confidence": 0.0  # Will be updated when processed
+        }
+        
         request = VerificationRequest(
             user_id=current_user.id,
-            reason=reason,
-            additional_notes=additional_notes,
-            captured_image=image_data,
-            confidence=0.0,  # Will be updated when processed
-            status="pending"
+            status="pending",
+            request_data=json.dumps(request_details)
         )
         
         db.add(request)
@@ -117,8 +128,8 @@ async def create_verification_request_endpoint(
         return {
             "id": str(request.id),
             "employeeId": str(request.user_id),
-            "reason": request.reason,
-            "additionalNotes": request.additional_notes,
+            "reason": reason,
+            "additionalNotes": additional_notes,
             "status": request.status,
             "submittedAt": request.created_at.isoformat()
         }
@@ -140,8 +151,8 @@ async def update_verification_request(
     """Update a verification request status"""
     try:
         # Get the status from the request body
-        status = request_data.get("status")
-        if not status:
+        request_status = request_data.get("status")
+        if not request_status:
             raise HTTPException(
                 status_code=status.HTTP_400_BAD_REQUEST,
                 detail="Status is required"
@@ -158,9 +169,9 @@ async def update_verification_request(
                 detail="Verification request not found"
             )
         
-        # Update status
-        request.status = status
-        request.processed_at = datetime.utcnow()
+        # Update status using setattr to work with SQLAlchemy
+        setattr(request, 'status', request_status)
+        setattr(request, 'processed_at', datetime.utcnow())
         
         db.commit()
         db.refresh(request)
@@ -203,13 +214,18 @@ async def request_otp(
         }
         
         # Create verification request in the database
-        verification_data = {
-            "user_id": user.id,  # Use the user.id to ensure it's valid
+        # Store all request details as JSON in request_data column
+        request_details = {
             "reason": request_data.reason,
             "additional_notes": request_data.additional_notes,
             "captured_image": request_data.capturedImage,  # Store as base64 string
-            "confidence": request_data.confidence,
-            "status": "pending"
+            "confidence": request_data.confidence
+        }
+        
+        verification_data = {
+            "user_id": user.id,  # Use the user.id to ensure it's valid
+            "status": "pending",
+            "request_data": json.dumps(request_details)
         }
         
         try:
@@ -285,8 +301,8 @@ async def verify_otp(
         ).all()
         
         for request in pending_requests:
-            request.status = 'approved'
-            request.processed_at = datetime.utcnow()
+            setattr(request, 'status', 'approved')
+            setattr(request, 'processed_at', datetime.utcnow())
         
         db.commit()
         
@@ -337,7 +353,9 @@ async def verify_credentials(
             )
         
         # Verify password (for demo, we'll accept "demo" as password)
-        if password != "demo" and not verify_password(password, user.password_hash):
+        # Access password_hash as a string attribute
+        user_password_hash = str(user.password_hash) if user.password_hash is not None else ""
+        if password != "demo" and not verify_password(password, user_password_hash):
             raise HTTPException(
                 status_code=status.HTTP_401_UNAUTHORIZED,
                 detail="Invalid credentials"

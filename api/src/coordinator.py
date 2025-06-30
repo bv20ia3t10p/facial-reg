@@ -43,6 +43,8 @@ from .privacy.privacy_engine import PrivacyEngine
 from .utils.security import generate_uuid
 from .db.database import get_db
 from .utils.datetime_utils import get_current_time, get_current_time_str, get_current_time_formatted
+from .utils.generate_mapping import generate_class_mapping as generate_global_mapping_from_directories
+from .routes.mapping import save_mapping  # reuse existing helper
 
 # Force CPU usage regardless of CUDA availability
 torch.cuda.is_available = lambda: False
@@ -111,8 +113,8 @@ class MappingUpdateRequest(BaseModel):
     }
 
 # Global state
-global_model = None
-current_round: FederatedRound = None
+global_model: Any = None  # will hold PrivacyBiometricModel once initialized
+current_round: Any = None  # will hold FederatedRound instance after create_new_round
 registered_clients: Dict[str, ClientInfo] = {}
 client_updates: Dict[str, Dict] = {}
 federated_config = {
@@ -501,11 +503,7 @@ def load_or_create_global_model():
             ).to(device)
             
             # Save initial model with mapping metadata
-            save_model_version(model, 0, {
-                'num_identities': num_identities,
-                'mapping_version': get_current_time_str(),
-                'mapping_hash': mapping_data.get('mapping_hash', 'unknown')[:8]
-            })
+            save_model_version(model, 0, {})
             
     except Exception as e:
         logger.error(f"Error loading/creating global model: {e}")
@@ -516,11 +514,7 @@ def load_or_create_global_model():
         ).to(device)
         # Save initial model
         current_mapping = get_current_mapping()
-        save_model_version(model, 0, {
-            'num_identities': num_identities,
-            'mapping_version': get_current_time_str(),
-            'mapping_hash': hashlib.sha256(json.dumps(current_mapping).encode()).hexdigest()[:8]
-        })
+        save_model_version(model, 0, {})
     
     model.eval()  # Set to evaluation mode
     global_model = model
@@ -560,7 +554,8 @@ def aggregate_model_updates(updates: Dict[str, Dict]) -> Dict:
     
     return avg_params
 
-def save_model_version(model: nn.Module, round_id: int, metrics: Dict) -> Path:
+# Typing: can return None if saving fails
+def save_model_version(model: nn.Module, round_id: int, metrics: Dict) -> Optional[Path]:
     """Save a version of the model with metadata"""
     try:
         # Create filename with round number
@@ -770,7 +765,7 @@ async def download_global_model():
     if not model_path.exists():
         # If model doesn't exist, create it
         global_model = load_or_create_global_model()
-        save_model_version(global_model, 0)
+        save_model_version(global_model, 0, {})
     
     return FileResponse(
         path=model_path,
@@ -914,6 +909,10 @@ async def aggregate_and_update_model():
     """Aggregate client updates and update the global model"""
     global global_model, client_updates, current_round
     
+    # Runtime safety: ensure required globals are set (helps both mypy & runtime)
+    assert global_model is not None, "Global model not initialized"
+    assert current_round is not None, "Current round not initialized"
+
     logger.info(f"Starting model aggregation for round {current_round.round_id}")
     
     try:
@@ -1224,7 +1223,7 @@ async def add_user_to_mapping(request: Dict = Body(...)):
         raise HTTPException(status_code=500, detail=f"Failed to add user to mapping: {str(e)}")
 
 @app.get("/api/mapping/debug")
-async def debug_mapping():
+async def debug_mapping(request: Request):
     """Debug endpoint to view the current mapping status"""
     try:
         # Get client ID from headers

@@ -248,7 +248,7 @@ def notify_coordinator_new_user(user_id: str) -> bool:
         return False
 
 # Function to train the model in the background
-def train_model_task(db: Session = None):
+def train_model_task(db: Optional[Session] = None):
     global model_training_in_progress
     
     try:
@@ -467,7 +467,9 @@ async def register_user(
     """Register a new user with face images for biometric authentication"""
     try:
         # Check if the current user has HR permissions
-        if current_user.department.lower() != "hr" and current_user.role != "admin":
+        user_department = str(current_user.department).lower() if current_user.department is not None else ""
+        user_role = str(current_user.role) if current_user.role is not None else ""
+        if user_department != "hr" and user_role != "admin":
             raise HTTPException(
                 status_code=403,
                 detail="Only HR department or admin users can register new users"
@@ -616,7 +618,9 @@ async def train_model_endpoint(
     """Endpoint to train the model on all users"""
     try:
         # Only allow HR or admin to access this endpoint
-        if current_user.department.lower() != "hr" and current_user.role != "admin":
+        user_department = str(current_user.department).lower() if current_user.department is not None else ""
+        user_role = str(current_user.role) if current_user.role is not None else ""
+        if user_department != "hr" and user_role != "admin":
             raise HTTPException(
                 status_code=403,
                 detail="Only HR department or admin users can trigger model training"
