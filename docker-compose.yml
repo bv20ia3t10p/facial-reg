@@ -9,15 +9,6 @@ services:
     container_name: fl-coordinator
     ports:
       - "9000:8000"
-    volumes:
-      - ./api:/app/api
-      - ./models:/app/models
-      - ./data:/app/data
-      - ./cache:/app/cache
-      - ./logs:/app/logs
-      - ./database:/app/database
-      # privacy_biometrics removed - API is now independent
-      - pip-cache:/root/.cache/pip
     environment:
       - PYTHONPATH=/app
       - TORCH_HOME=/app/cache/torch
@@ -45,18 +36,11 @@ services:
     build:
       context: .
       dockerfile: Dockerfile.client
+      args:
+        - CLIENT_ID=client1
     container_name: client1-biometric-api
     ports:
       - "8000:8000"
-    volumes:
-      - ./api:/app/api
-      - ./data:/app/data
-      - ./models:/app/models
-      - ./cache:/app/cache
-      - ./logs:/app/logs
-      # privacy_biometrics removed - API is now independent
-      - ./database/client1.db:/app/database/facial_reg.db
-      - pip-cache:/root/.cache/pip
     environment:
       - PYTHONPATH=/app
       - TORCH_HOME=/app/cache/torch
@@ -103,18 +87,11 @@ services:
     build:
       context: .
       dockerfile: Dockerfile.client
+      args:
+        - CLIENT_ID=client2
     container_name: client2-biometric-api
     ports:
       - "8001:8000"
-    volumes:
-      - ./api:/app/api
-      - ./data:/app/data
-      - ./models:/app/models
-      - ./cache:/app/cache
-      - ./logs:/app/logs
-      # privacy_biometrics removed - API is now independent
-      - ./database/client2.db:/app/database/facial_reg.db
-      - pip-cache:/root/.cache/pip
     environment:
       - PYTHONPATH=/app
       - TORCH_HOME=/app/cache/torch
@@ -164,8 +141,6 @@ services:
     container_name: emotion-api
     ports:
       - "1236:8080"
-    volumes:
-      - ./emo-api/model.pth:/app/model.pth
     environment:
       - CUDA_VISIBLE_DEVICES=0
       - MODEL_PATH=/app/model.pth
@@ -189,6 +164,4 @@ volumes:
     driver: local
   biometric_logs:
     driver: local
-  pip-cache:
-    name: facial-reg-pip-cache
   

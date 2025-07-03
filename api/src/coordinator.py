@@ -16,6 +16,7 @@ import uuid
 import sys
 import base64
 import io
+import shutil
 
 import torch
 import torch.nn as nn
@@ -765,7 +766,17 @@ async def download_global_model():
     if not model_path.exists():
         # If model doesn't exist, create it
         global_model = load_or_create_global_model()
-        save_model_version(global_model, 0, {})
+        # Save a version and copy it to global_model.pth for easy download
+        saved_path = save_model_version(global_model, 0, {})
+        try:
+            if saved_path and saved_path.exists():
+                shutil.copy(saved_path, model_path)
+            else:
+                # Fallback: save minimal state dict
+                torch.save({"state_dict": global_model.state_dict()}, model_path)
+        except Exception as e:
+            logger.error(f"Failed to create global_model.pth: {e}")
+            raise HTTPException(status_code=500, detail="Failed to prepare global model file")
     
     return FileResponse(
         path=model_path,

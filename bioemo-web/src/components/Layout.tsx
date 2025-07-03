@@ -5,7 +5,6 @@ import {
   BarChartOutlined, 
   SettingOutlined,
   UserOutlined,
-  UserAddOutlined,
   HeartOutlined,
   SafetyOutlined
 } from '@ant-design/icons';
@@ -21,7 +20,6 @@ const mainLinks = [
   { icon: BarChartOutlined, label: 'Analytics', key: '/analytics' },
   { icon: HeartOutlined, label: 'HR Dashboard', key: '/hr-dashboard' },
   { icon: SafetyOutlined, label: 'Verification Requests', key: '/verification-requests' },
-  { icon: UserAddOutlined, label: 'Add User', key: '/add-user' },
   { icon: SettingOutlined, label: 'Settings', key: '/settings' },
 ];
 

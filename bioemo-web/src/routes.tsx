@@ -7,7 +7,6 @@ import { Toaster } from 'react-hot-toast';
 import { Home } from './pages/Home';
 import Auth from './pages/Auth';
 import { Analytics } from './pages/Analytics';
-import { AddUser } from './pages/AddUser';
 import HRDashboard from './pages/HRDashboard';
 import { VerificationRequests } from './pages/VerificationRequests';
 import { UserProfile } from './pages/UserProfile';
@@ -29,7 +28,6 @@ const AppRoutes: React.FC = () => {
         <Route path="/" element={<Home />} />
         <Route path="/authentication" element={<Auth />} />
         <Route path="/analytics" element={<Analytics />} />
-        <Route path="/add-user" element={<AddUser />} />
         <Route path="/hr-dashboard" element={<HRDashboard />} />
         <Route path="/verification-requests" element={<VerificationRequests />} />
         <Route path="/profile/:userId" element={<UserProfile />} />

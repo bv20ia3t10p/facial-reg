@@ -29,8 +29,22 @@ COPY api/requirements.txt requirements.txt
 # Install Python dependencies (excluding PyTorch as it's in base image)
 RUN pip install --no-cache-dir -r requirements.txt
 
-# Copy application files
-COPY . /app
+# Copy application code
+COPY api/ /app/api/
+
+# Create required directories first
+RUN mkdir -p /app/data/partitioned /app/cache/torch /app/logs
+
+# Copy only coordinator-specific data
+COPY data/partitioned/server /app/data/partitioned/server
+COPY data/identity_mapping.json /app/data/
+
+# Copy coordinator model files
+COPY models/server_model.pth /app/models/server_model.pth
+COPY models/best_pretrained_model.pth /app/models/best_pretrained_model.pth
+
+# Create placeholder database if it doesn't exist (but not model files)
+RUN touch /app/database/federated.db
 
 # Expose port for the coordinator
 EXPOSE 8000

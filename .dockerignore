@@ -35,11 +35,11 @@ ENV/
 *.swp
 *.swo
 
-# Data and logs
-data/
+# Data and logs (but keep essential data for containers)
 logs/
 *.log
-*.sqlite3
+# Remove data/ exclusion to allow copying necessary data files
+# *.sqlite3 - commented out to allow database files
 
 # Docker
 .docker/
