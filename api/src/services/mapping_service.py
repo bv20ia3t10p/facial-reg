@@ -31,7 +31,7 @@ class MappingService:
         self.client_data_dir = None
         # Initialization must now be called asynchronously after creation
     
-    async def initialize_mapping(self) -> bool:
+    def initialize_mapping(self) -> bool:
         """
         Initialize mapping using identity_mapping.json file
         
@@ -41,7 +41,7 @@ class MappingService:
         try:
             # Try to load from coordinator first
             try:
-                response = await self._fetch_mapping_from_server()
+                response = self._fetch_mapping_from_server()
                 if response:
                     logger.info("Successfully fetched mapping from coordinator")
                     return True
@@ -112,13 +112,13 @@ class MappingService:
         logger.warning("Could not find or load identity_mapping.json from any location")
         return False
     
-    async def _fetch_mapping_from_server(self) -> bool:
+    def _fetch_mapping_from_server(self) -> bool:
         """Fetch mapping from coordinator server"""
         server_url = os.getenv("SERVER_URL", "http://fl-coordinator:8080")
         
         try:
-            async with httpx.AsyncClient(transport=httpx.AsyncHTTPTransport(http2=False)) as client:
-                response = await client.get(f"{server_url}/api/mapping", timeout=5)
+            with httpx.Client(transport=httpx.HTTPTransport(http2=False)) as client:
+                response = client.get(f"{server_url}/api/mapping", timeout=5)
             
             if response.status_code == 200:
                 mapping_data = response.json()
@@ -281,16 +281,32 @@ class MappingService:
         Returns:
             Dictionary with mapping metadata
         """
-        # Ensure total_identities is accurate
-        self.mapping_metadata['total_identities'] = len(self.mapping_cache)
-        return self.mapping_metadata.copy()
+        return {
+            "total_identities": self.get_total_identities(),
+            "metadata": self.mapping_metadata
+        }
     
-    async def refresh_mapping(self) -> bool:
+    def refresh_mapping(self) -> bool:
         """
-        Force a refresh of the mapping from the source
+        Refreshes the mapping from the source (file or server).
+
+        Returns:
+            True if mapping was refreshed successfully, False otherwise.
         """
-        return await self.initialize_mapping()
-    
+        logger.info("Attempting to refresh mapping...")
+        # First, try fetching from server, as it's the most dynamic source
+        if self._fetch_mapping_from_server():
+            logger.info("Successfully refreshed mapping from server.")
+            return True
+        
+        # If server fails, fallback to loading from the identity mapping file
+        if self._load_from_identity_mapping_file():
+            logger.info("Successfully refreshed mapping from file.")
+            return True
+
+        logger.warning("Failed to refresh mapping from all available sources.")
+        return False
+
     def search_identities(self, query: str, limit: int = 10) -> List[str]:
         """
         Search for identities matching a query string
@@ -329,7 +345,7 @@ class MappingService:
             "metadata": self.mapping_metadata
         }
     
-    async def get_filtered_mapping_for_client(self, client_id: Optional[str] = None, data_dir: Optional[str] = None) -> Dict[str, int]:
+    def get_filtered_mapping_for_client(self, client_id: Optional[str] = None, data_dir: Optional[str] = None) -> Dict[str, int]:
         """
         Get a filtered mapping for a specific client based on their local data.
         This is crucial for federated learning where clients only know about
@@ -348,7 +364,7 @@ class MappingService:
 
         if not self.mapping_cache:
             logger.info("Main mapping not initialized, initializing now...")
-            await self.initialize_mapping()
+            self.initialize_mapping()
 
         if client_id and not data_dir:
             self.client_data_dir = self.client_data_dir or Path(f"/app/data/partitioned/{client_id}")
@@ -380,53 +396,37 @@ class MappingService:
 
         return filtered_mapping
 
-    async def get_identity_by_model_class(self, model_class: int, use_filtered: bool = True) -> Optional[str]:
+    def get_identity_by_model_class(self, model_class: int, use_filtered: bool = True) -> Optional[str]:
         """
-        Get identity by model class index, supporting filtered mappings.
+        Get identity by the model's output class index.
+        This is the reverse of `get_model_class_by_identity`.
 
         Args:
-            model_class: The class index from the model's output.
-            use_filtered: Whether to use the client-specific filtered mapping.
+            model_class: The class index predicted by the model.
+            use_filtered: Whether to use the filtered mapping cache.
 
         Returns:
-            The identity string (e.g., 'user_id') or None if not found.
+            The identity string (e.g., "user_123") or None if not found.
         """
-        if use_filtered:
-            # Assumes a client context is set (e.g., via client_id)
-            client_id = os.getenv("CLIENT_ID")
-            if client_id in self.filtered_reverse_mapping_cache:
-                return self.filtered_reverse_mapping_cache[client_id].get(model_class)
-            else:
-                # If no filtered mapping is cached, generate it
-                await self.get_filtered_mapping_for_client(client_id=client_id)
-                if client_id in self.filtered_reverse_mapping_cache:
-                    return self.filtered_reverse_mapping_cache[client_id].get(model_class)
-        
-        # Fallback to global mapping
-        return self.get_identity_by_index(model_class)
+        if use_filtered and self.filtered_reverse_mapping_cache:
+            return self.filtered_reverse_mapping_cache.get(model_class)
+        return self.reverse_mapping_cache.get(model_class)
 
-    async def get_model_class_by_identity(self, identity: str, use_filtered: bool = True) -> Optional[int]:
+    def get_model_class_by_identity(self, identity: str, use_filtered: bool = True) -> Optional[int]:
         """
-        Get model class index by identity, supporting filtered mappings.
+        Get the model's output class index for a given identity.
+        This is the reverse of `get_identity_by_model_class`.
 
         Args:
-            identity: The identity string (e.g., 'user_id').
-            use_filtered: Whether to use the client-specific filtered mapping.
+            identity: The identity string (e.g., "user_123").
+            use_filtered: Whether to use the filtered mapping cache.
 
         Returns:
             The model class index or None if not found.
         """
-        if use_filtered:
-            client_id = os.getenv("CLIENT_ID")
-            if client_id in self.filtered_mapping_cache:
-                return self.filtered_mapping_cache[client_id].get(identity)
-            else:
-                # Generate filtered mapping if not cached
-                filtered_mapping = await self.get_filtered_mapping_for_client(client_id=client_id)
-                return filtered_mapping.get(identity)
-        
-        # Fallback to global mapping
-        return self.get_index_by_identity(identity)
+        if use_filtered and self.filtered_mapping_cache:
+            return self.filtered_mapping_cache.get(identity)
+        return self.mapping_cache.get(identity)
 
 # Global instance for API use
 mapping_service = MappingService()

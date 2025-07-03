@@ -798,7 +798,7 @@ async def get_global_model_info():
     }
 
 @app.get("/models/global/download")
-async def download_global_model():
+def download_global_model():
     """Download the current global model"""
     model_path = model_dir / "global_model.pth"
     
@@ -824,7 +824,7 @@ async def download_global_model():
     )
 
 @app.post("/models/update")
-async def notify_model_update(request: ModelUpdateRequest):
+def notify_model_update(request: ModelUpdateRequest):
     """Notify coordinator of pending model update"""
     global client_updates, current_round
     
@@ -874,7 +874,7 @@ async def notify_model_update(request: ModelUpdateRequest):
         raise HTTPException(status_code=500, detail=str(e))
 
 @app.post("/models/update/{client_id}/{round_id}/upload")
-async def upload_model_update(
+def upload_model_update(
     client_id: str,
     round_id: int,
     background_tasks: BackgroundTasks,
@@ -963,7 +963,7 @@ async def upload_model_update(
         logger.error(f"Error processing model update: {e}")
         raise HTTPException(status_code=500, detail=str(e))
 
-async def aggregate_and_update_model():
+def aggregate_and_update_model():
     """
     Aggregate client model updates and update the global model.
     """
@@ -1017,7 +1017,7 @@ async def aggregate_and_update_model():
         create_new_round()
 
 @app.get("/api/mapping")
-async def get_global_mapping(request: Request):
+def get_global_mapping(request: Request):
     """
     Get the global class-to-user mapping using centralized identity_mapping.json
     
@@ -1049,7 +1049,7 @@ async def get_global_mapping(request: Request):
     }
 
 @app.post("/api/mapping/update")
-async def update_global_mapping(request: MappingUpdateRequest):
+def update_global_mapping(request: MappingUpdateRequest):
     """
     Update the global class-to-user mapping
     
@@ -1097,7 +1097,7 @@ async def update_global_mapping(request: MappingUpdateRequest):
         raise HTTPException(status_code=500, detail=f"Failed to update global mapping: {str(e)}")
 
 @app.get("/api/mapping/generate")
-async def generate_mapping():
+def generate_mapping():
     """
     Generate a new global mapping from partitioned data directories
     This follows the same approach as in improved_privacy_training.py
@@ -1143,7 +1143,7 @@ async def generate_mapping():
         raise HTTPException(status_code=500, detail=f"Failed to generate mapping: {str(e)}")
 
 @app.get("/api/mapping/refresh")
-async def refresh_global_mapping(request: Request):
+def refresh_global_mapping(request: Request):
     """
     Force refresh the global mapping from centralized identity_mapping.json
     
@@ -1188,7 +1188,7 @@ async def refresh_global_mapping(request: Request):
         raise HTTPException(status_code=500, detail=f"Failed to refresh global mapping: {str(e)}")
 
 @app.post("/api/mapping/add-user")
-async def add_user_to_mapping(request: Dict = Body(...)):
+def add_user_to_mapping(request: Dict = Body(...)):
     """Add a new user to the global mapping"""
     try:
         user_id = request.get("user_id")
@@ -1256,7 +1256,7 @@ async def add_user_to_mapping(request: Dict = Body(...)):
         raise HTTPException(status_code=500, detail=f"Failed to add user to mapping: {str(e)}")
 
 @app.get("/api/mapping/debug")
-async def debug_mapping(request: Request):
+def debug_mapping(request: Request):
     """Debug endpoint to view the current mapping status"""
     try:
         # Get client ID from headers

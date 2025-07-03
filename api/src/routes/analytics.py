@@ -257,8 +257,8 @@ async def get_hr_analytics(
         # Check if user is in HR department or has HR role
         is_hr_user = False
         if current_user:
-            department = current_user.department.lower() if current_user.department else ""
-            role = current_user.role.lower() if current_user.role else ""
+            department = current_user.department.lower() if current_user.department is not None else ""
+            role = current_user.role.lower() if current_user.role is not None else ""
             
             if ('hr' in department or 'human resources' in department or 
                 'hr' in role or 'human resources' in role):
@@ -282,7 +282,7 @@ async def get_hr_analytics(
         # Calculate overall emotion distribution
         overall_emotions = {}
         for log in logs:
-            if log.emotion_data:
+            if log.emotion_data is not None:
                 try:
                     # Handle different emotion_data formats - use safe parsing for all cases
                     emotion_data = safe_parse_emotion_data(log.emotion_data)
@@ -323,7 +323,7 @@ async def get_hr_analytics(
             # Calculate department emotion distribution
             dept_emotions = {}
             for log in dept_logs:
-                if log.emotion_data:
+                if log.emotion_data is not None:
                     try:
                         # Handle different emotion_data formats - use safe parsing for all cases
                         emotion_data = safe_parse_emotion_data(log.emotion_data)
@@ -366,7 +366,7 @@ async def get_hr_analytics(
             total_emotions = 0
             
             for log in day_logs:
-                if log.emotion_data:
+                if log.emotion_data is not None:
                     try:
                         # Handle different emotion_data formats
                         if isinstance(log.emotion_data, dict):
@@ -452,7 +452,7 @@ async def get_auth_analytics(
         
         # Calculate metrics
         total_auths = len(logs)
-        successful_auths = sum(1 for log in logs if log.success)
+        successful_auths = sum(1 for log in logs if log.success is True)
         
         # Calculate average confidence
         avg_confidence = 0
@@ -472,7 +472,7 @@ async def get_auth_analytics(
         
         total_emotions = 0
         for log in logs:
-            if log.emotion_data:
+            if log.emotion_data is not None:
                 try:
                     # Parse emotion data
                     emotion_data = safe_parse_emotion_data(log.emotion_data)
@@ -572,7 +572,7 @@ async def get_auth_logs(
                 "user_id": log.user_id,
                 "success": log.success,
                 "confidence": log.confidence,
-                "emotion_data": safe_parse_emotion_data(log.emotion_data) if log.emotion_data else None,
+                "emotion_data": safe_parse_emotion_data(log.emotion_data) if log.emotion_data is not None else None,
                 "created_at": log.created_at.isoformat(),
                 "device_info": log.device_info
             }
@@ -587,7 +587,7 @@ async def get_auth_logs(
                 "user_id": log.user_id,
                 "success": log.success,
                 "confidence": log.confidence,
-                "emotion_data": safe_parse_emotion_data(log.emotion_data) if log.emotion_data else None,
+                "emotion_data": safe_parse_emotion_data(log.emotion_data) if log.emotion_data is not None else None,
                 "created_at": log.created_at.isoformat(),
                 "device_info": log.device_info
             } for log in logs]
@@ -603,7 +603,7 @@ async def get_auth_logs(
                 "user_id": log.user_id,
                 "success": log.success,
                 "confidence": log.confidence,
-                "emotion_data": safe_parse_emotion_data(log.emotion_data) if log.emotion_data else None,
+                "emotion_data": safe_parse_emotion_data(log.emotion_data) if log.emotion_data is not None else None,
                 "created_at": log.created_at.isoformat(),
                 "device_info": log.device_info
             } for log in logs]

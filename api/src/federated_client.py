@@ -203,7 +203,7 @@ class FederatedClient:
             return False
         try:
             # Initialize mapping from centralized source
-            await self.mapping_service.initialize_mapping()
+            self.mapping_service.initialize_mapping()
             mapping = self.mapping_service.get_mapping()
             
             # Verify mapping format
@@ -230,7 +230,7 @@ class FederatedClient:
             return None
         try:
             # Get current mapping
-            await self.mapping_service.initialize_mapping()
+            self.mapping_service.initialize_mapping()
             mapping = self.mapping_service.get_mapping()
             if not mapping:
                 logger.error("Cannot load model without valid mapping")
@@ -449,7 +449,7 @@ class FederatedClient:
             
         try:
             # Get mapping info
-            await self.mapping_service.initialize_mapping()
+            self.mapping_service.initialize_mapping()
             mapping = self.mapping_service.get_mapping()
             if not mapping:
                 logger.error("Cannot submit update without valid mapping")

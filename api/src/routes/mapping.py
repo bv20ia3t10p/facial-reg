@@ -110,7 +110,7 @@ def save_mapping(mapping: Dict[str, str]) -> bool:
         return False
 
 @router.get("/api/mapping")
-async def get_global_mapping():
+def get_global_mapping():
     """
     Get the global class-to-user mapping
     
@@ -126,7 +126,7 @@ async def get_global_mapping():
     }
 
 @router.post("/api/mapping/update")
-async def update_global_mapping(request: MappingUpdateRequest):
+def update_global_mapping(request: MappingUpdateRequest):
     """
     Update the global class-to-user mapping
     
@@ -171,7 +171,7 @@ async def update_global_mapping(request: MappingUpdateRequest):
         raise HTTPException(status_code=500, detail=f"Failed to update global mapping: {str(e)}")
 
 @router.get("/api/mapping/refresh")
-async def refresh_global_mapping():
+def refresh_global_mapping():
     """
     Force refresh the global mapping from partitioned data directories
     Following the exact approach in improved_privacy_training.py
@@ -212,7 +212,7 @@ async def refresh_global_mapping():
 # Removed duplicate debug endpoint - using the one below with filtered mapping support
 
 @router.get("/api/mapping/debug")
-async def debug_mapping_info():
+def debug_mapping_info():
     """Debug endpoint to show current mapping configuration"""
     try:
         service = get_mapping_service()
