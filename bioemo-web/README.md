@@ -24,15 +24,33 @@ A modern, Twitter-inspired web interface for the BioEmo facial recognition and e
    npm install
    ```
 
-2. Start the development server:
+2. Configure environment variables:
+   ```bash
+   # Copy the example file and edit as needed
+   cp env.example .env
+   ```
+
+3. Start the development server:
    ```bash
    npm run dev
    ```
 
-3. Build for production:
+4. Build for production:
    ```bash
    npm run build
    ```
+
+## Environment Variables
+
+The application uses the following environment variables:
+
+- `VITE_AUTH_SERVER_URL`: Authentication API server URL (default: http://localhost:8001)
+- `VITE_EMOTION_SERVER_URL`: Emotion analysis API server URL (default: http://localhost:1235)
+- `VITE_USE_MOCK_API`: Whether to use mock data instead of real API calls (default: false)
+- `VITE_CONFIDENCE_THRESHOLD`: Confidence threshold for facial recognition (0.0-1.0, default: 0.7)
+- `VITE_LOW_CONFIDENCE_THRESHOLD`: Low confidence threshold for verification requests (0.0-1.0, default: 0.3)
+
+Copy `env.example` to `.env` and modify the values as needed for your environment.
 
 ## Project Structure
 

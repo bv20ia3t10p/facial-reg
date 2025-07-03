@@ -284,24 +284,13 @@ async def get_hr_analytics(
         for log in logs:
             if log.emotion_data:
                 try:
-                    # Handle different emotion_data formats - SQLAlchemy already converts JSON column to dict
-                    emotion_data = log.emotion_data
+                    # Handle different emotion_data formats - use safe parsing for all cases
+                    emotion_data = safe_parse_emotion_data(log.emotion_data)
                     
-                    # Skip if emotion_data is not in the expected format
-                    if not isinstance(emotion_data, dict):
-                        logger.warning(f"Unexpected emotion_data format: {type(emotion_data)}")
-                        # Try to convert to dict if it's a simple string
-                        if isinstance(emotion_data, str) and emotion_data.strip():
-                            if emotion_data.strip().lower() in ['happiness', 'sadness', 'anger', 'fear', 'disgust', 'surprise', 'neutral']:
-                                emotion_data = {emotion_data.strip().lower(): 1.0}
-                            else:
-                                try:
-                                    emotion_data = safe_parse_emotion_data(emotion_data)
-                                except Exception as e:
-                                    logger.warning(f"Failed to parse emotion data as JSON: {emotion_data[:30]}...")
-                                    continue
-                        else:
-                            continue
+                    # Skip if emotion_data couldn't be parsed
+                    if not emotion_data:
+                        logger.debug("Empty emotion data, skipping")
+                        continue
                     
                     normalized_emotions = normalize_emotion_data(emotion_data)
                     for emotion, value in normalized_emotions.items():
@@ -336,24 +325,13 @@ async def get_hr_analytics(
             for log in dept_logs:
                 if log.emotion_data:
                     try:
-                        # Handle different emotion_data formats - SQLAlchemy already converts JSON column to dict
-                        emotion_data = log.emotion_data
+                        # Handle different emotion_data formats - use safe parsing for all cases
+                        emotion_data = safe_parse_emotion_data(log.emotion_data)
                         
-                        # Skip if emotion_data is not in the expected format
-                        if not isinstance(emotion_data, dict):
-                            logger.warning(f"Unexpected emotion_data format for department {dept}: {type(emotion_data)}")
-                            # Try to convert to dict if it's a simple string
-                            if isinstance(emotion_data, str) and emotion_data.strip():
-                                if emotion_data.strip().lower() in ['happiness', 'sadness', 'anger', 'fear', 'disgust', 'surprise', 'neutral']:
-                                    emotion_data = {emotion_data.strip().lower(): 1.0}
-                                else:
-                                    try:
-                                        emotion_data = safe_parse_emotion_data(emotion_data)
-                                    except Exception as e:
-                                        logger.warning(f"Failed to parse emotion data as JSON for department {dept}: {emotion_data[:30]}...")
-                                        continue
-                            else:
-                                continue
+                        # Skip if emotion_data couldn't be parsed
+                        if not emotion_data:
+                            logger.debug(f"Empty emotion data for department {dept}, skipping")
+                            continue
                         
                         normalized_emotions = normalize_emotion_data(emotion_data)
                         for emotion, value in normalized_emotions.items():

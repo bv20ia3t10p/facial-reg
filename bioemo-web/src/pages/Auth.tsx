@@ -8,6 +8,7 @@ import { setAuthToken, getAuthToken } from '../services/auth';
 import { toast } from 'react-hot-toast';
 import { useUser } from '../contexts/UserContext';
 import { useTheme } from '../contexts/ThemeContext';
+import { envConfig } from '../config/env';
 
 // Using Ant Design components since they're already in the project
 import { Card, Typography, Space, Row, Col, Spin, Steps, Divider, Alert } from 'antd';
@@ -87,7 +88,7 @@ const Auth: React.FC = () => {
         user_id: 'unknown',
         authenticated_at: new Date().toISOString(),
         capturedImage: imageSrc,
-        threshold: 0.7
+        threshold: envConfig.confidenceThreshold
       };
       setAuthResult(errorResponse);
       toast.error('Authentication failed. Please try again.');

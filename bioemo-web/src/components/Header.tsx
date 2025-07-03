@@ -12,7 +12,6 @@ import {
   BulbFilled,
   MenuOutlined,
   LogoutOutlined,
-  UserAddOutlined,
 } from '@ant-design/icons';
 import { useTheme } from '../contexts/ThemeContext';
 import { logout, isAuthenticated } from '../services/auth';
@@ -70,7 +69,6 @@ export const Header: React.FC = () => {
   const hrMenuItems = [
     { key: '/hr-dashboard', icon: <TeamOutlined />, text: 'HR Dashboard' },
     { key: '/verification-requests', icon: <UserOutlined />, text: 'Verification' },
-    { key: '/add-user', icon: <UserAddOutlined />, text: 'Add User' },
   ];
   
   // Combine menu items based on user role

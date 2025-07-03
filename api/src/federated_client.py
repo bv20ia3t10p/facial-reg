@@ -13,6 +13,8 @@ from typing import Dict, List, Optional, Any, Tuple
 from pathlib import Path
 import random
 import hashlib
+import io
+import base64
 
 import torch
 import torch.nn as nn
@@ -24,7 +26,6 @@ from fastapi import BackgroundTasks
 import httpx
 from PIL import Image
 from torchvision import transforms
-import io
 
 from .models.privacy_biometric_model import PrivacyBiometricModel
 from .privacy.privacy_engine import PrivacyEngine
@@ -211,8 +212,11 @@ class FederatedClient:
     async def get_dataset_size(self):
         """Get size of local dataset"""
         try:
-            data_dir = Path(f"/app/data/partitioned/{self.client_id}")
+            # Allow override through env-var so users can mount data wherever they like
+            data_root = os.getenv("CLIENT_DATA_DIR", f"/app/data/partitioned/{self.client_id}")
+            data_dir = Path(data_root)
             if not data_dir.exists():
+                logger.warning(f"[{self.client_id}] data directory {data_dir} not found")
                 return 0
             
             total_samples = 0
@@ -220,6 +224,7 @@ class FederatedClient:
                 if class_dir.is_dir():
                     total_samples += len(list(class_dir.glob('*.jpg')))
             
+            logger.info(f"[{self.client_id}] counted {total_samples} local samples in {data_dir}")
             return total_samples
         except Exception as e:
             logger.error(f"Error getting dataset size: {e}")
@@ -236,7 +241,7 @@ class FederatedClient:
                     continue
                 
                 round_info = response.json()
-                round_number = round_info.get("round_number", 0)
+                round_number = round_info.get("round_id", 0)
                 
                 if round_number > self.current_round:
                     logger.info(f"Starting participation in round {round_number}")
@@ -295,6 +300,13 @@ class FederatedClient:
         except Exception as e:
             logger.error(f"Error during local training: {e}")
 
+    def _serialize_state_dict(self, state_dict: Dict[str, torch.Tensor]) -> str:
+        """Serialize a state_dict to a base64-encoded string suitable for JSON payloads."""
+        buffer = io.BytesIO()
+        torch.save(state_dict, buffer)
+        buffer.seek(0)
+        return base64.b64encode(buffer.read()).decode('utf-8')
+
     async def submit_model_update(self, round_id: int) -> bool:
         """Submit model update to coordinator"""
         try:
@@ -311,7 +323,8 @@ class FederatedClient:
             
             # Prepare model update
             update = {
-                "weights": self.model.state_dict(),
+                # Encode weights so the payload is JSON-serialisable
+                "weights": self._serialize_state_dict(self.model.state_dict()),
                 "dataset_size": self.dataset_size,
                 "mapping_size": mapping_size,
                 "mapping_hash": mapping_hash,

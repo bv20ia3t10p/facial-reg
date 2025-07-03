@@ -4,7 +4,7 @@ import { calculateAllMetrics } from './wellbeingCalculator';
 import { getEnvConfig } from '../config/env';
 import { getAuthToken, setAuthToken, removeAuthToken } from './auth';
 
-const { authServerUrl, emotionServerUrl, useMockApi } = getEnvConfig();
+const { authServerUrl, emotionServerUrl, useMockApi, confidenceThreshold } = getEnvConfig();
 const API_PREFIX = '/api';  // API prefix for all endpoints
 
 
@@ -360,7 +360,7 @@ const generateMockAuthResult = (): AuthenticationResponse => {
     message: 'High confidence match - Access granted',
     user_id: userId,
     authenticated_at: timestamp,
-    threshold: 0.7,
+    threshold: confidenceThreshold,
     token: mockToken,
     department: "Human Resources",
     role: "HR Manager",

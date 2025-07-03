@@ -4,6 +4,7 @@ import type { AuthenticationResponse } from '../types';
 import { useState } from 'react';
 import { ManualVerificationForm } from './ManualVerificationForm';
 import { EmotionDisplay } from './EmotionDisplay';
+import { envConfig } from '../config/env';
 
 const { Text, Title, Paragraph } = Typography;
 const { Step } = Steps;
@@ -27,7 +28,8 @@ export function AuthenticationResult({
   onPasswordVerification,
   onRequestOTP
 }: AuthenticationResultProps) {
-  const { success, confidence, message, error, threshold = 0.7, emotions } = result;
+  const { success, confidence, message, error, threshold = envConfig.confidenceThreshold, emotions } = result;
+  const { lowConfidenceThreshold } = envConfig;
   const [showManualForm, setShowManualForm] = useState(false);
   const [showPasswordForm, setShowPasswordForm] = useState(false);
   const [showLowConfidenceForm, setShowLowConfidenceForm] = useState(false);
@@ -220,8 +222,8 @@ export function AuthenticationResult({
       );
     }
     
-    // Medium confidence (below threshold but above 30%)
-    if (confidence < threshold && confidence >= 0.3) {
+    // Medium confidence (below threshold but above low threshold)
+    if (confidence < threshold && confidence >= lowConfidenceThreshold) {
       return showPasswordForm ? (
         <Space direction="vertical" style={{ width: '100%' }}>
           <Alert
@@ -292,8 +294,8 @@ export function AuthenticationResult({
       );
     }
     
-    // Very low confidence (below 30%)
-    if (confidence < 0.3) {
+    // Very low confidence (below low threshold)
+    if (confidence < lowConfidenceThreshold) {
       // If HR request has been sent and OTP is requested, show OTP form
       if (hrRequestSent && otpRequested) {
         return (

@@ -317,7 +317,8 @@ async def process_authentication(db, image_data, email=None, password=None, devi
         try:
             emotion_result = await emotion_analyzer.analyze_emotion(image_data)
             if emotion_result:
-                auth_log.emotion_data = json.dumps(emotion_result)
+                # Store emotion data directly as dict for SQLAlchemy JSON column
+                auth_log.emotion_data = emotion_result
         except Exception as e:
             logger.warning(f"Emotion analysis failed: {e}")
             emotion_result = None
@@ -378,7 +379,10 @@ async def process_authentication(db, image_data, email=None, password=None, devi
                 "last_authenticated": user.last_authenticated.isoformat() + "Z" if user.last_authenticated else None
             },
             "emotions": formatted_emotions,  # Required by frontend in specific format
-            "emotion_data": json.loads(auth_log.emotion_data) if auth_log.emotion_data else None  # Keep for backward compatibility
+            "emotion_data": (
+                json.loads(auth_log.emotion_data) if isinstance(auth_log.emotion_data, str) 
+                else auth_log.emotion_data
+            ) if auth_log.emotion_data else None  # Keep for backward compatibility
         }
     except Exception as e:
         logger.error(f"Authentication processing failed: {e}", exc_info=True)

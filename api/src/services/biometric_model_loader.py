@@ -351,4 +351,42 @@ class BiometricModelLoader:
             logger.info(f"Loaded {len(compatible_state)} compatible layers out of {len(model_state)} total layers")
         else:
             logger.error("No compatible layers found!")
-            raise ValueError("No compatible layers could be loaded from the state dict") 
+            raise ValueError("No compatible layers could be loaded from the state dict")
+
+    def _create_fresh_model(self) -> nn.Module:
+        """Create a fresh model when no saved model exists"""
+        try:
+            # Get number of identities from mapping service
+            try:
+                from .mapping_service import mapping_service
+                mapping_info = mapping_service.get_mapping_info()
+                num_identities = mapping_info.get("total_identities", 300)
+                logger.info(f"Using number of identities from mapping service: {num_identities}")
+            except Exception as e:
+                logger.warning(f"Could not get identities from mapping service: {e}")
+                num_identities = 300
+                logger.info(f"Using default number of identities: {num_identities}")
+            
+            # Create a fresh PrivacyBiometricModel
+            logger.info("Creating fresh PrivacyBiometricModel")
+            model = PrivacyBiometricModel(
+                num_identities=num_identities,
+                privacy_enabled=True,
+                embedding_dim=512
+            ).to(self.device)
+            
+            # Set model to evaluation mode
+            model.eval()
+            
+            logger.info(f"Fresh model created successfully:")
+            logger.info(f"  - Architecture: PrivacyBiometricModel")
+            logger.info(f"  - Device: {self.device}")
+            logger.info(f"  - Num identities: {num_identities}")
+            logger.info(f"  - Embedding dim: 512")
+            logger.info(f"  - Note: This is a fresh model without pre-trained weights")
+            
+            return model
+            
+        except Exception as e:
+            logger.error(f"Error creating fresh model: {e}")
+            raise 

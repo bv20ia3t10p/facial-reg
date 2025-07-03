@@ -14,6 +14,9 @@ from pathlib import Path
 import hashlib
 import uuid
 import sys
+import base64
+import io
+import shutil
 
 import torch
 import torch.nn as nn
@@ -41,6 +44,8 @@ from .privacy.privacy_engine import PrivacyEngine
 from .utils.security import generate_uuid
 from .db.database import get_db
 from .utils.datetime_utils import get_current_time, get_current_time_str, get_current_time_formatted
+from .utils.generate_mapping import generate_class_mapping as generate_global_mapping_from_directories
+from .routes.mapping import save_mapping  # reuse existing helper
 
 # Force CPU usage regardless of CUDA availability
 torch.cuda.is_available = lambda: False
@@ -80,7 +85,7 @@ class FederatedRound(BaseModel):
     status: str
     active_clients: List[str] = []
     aggregation_completed: bool = False
-    metrics: Optional[Dict[str, float]] = None
+    metrics: Optional[Dict[str, Any]] = None
     
     model_config = {
         'protected_namespaces': ()
@@ -109,8 +114,8 @@ class MappingUpdateRequest(BaseModel):
     }
 
 # Global state
-global_model = None
-current_round: FederatedRound = None
+global_model: Any = None  # will hold PrivacyBiometricModel once initialized
+current_round: Any = None  # will hold FederatedRound instance after create_new_round
 registered_clients: Dict[str, ClientInfo] = {}
 client_updates: Dict[str, Dict] = {}
 federated_config = {
@@ -499,11 +504,7 @@ def load_or_create_global_model():
             ).to(device)
             
             # Save initial model with mapping metadata
-            save_model_version(model, 0, {
-                'num_identities': num_identities,
-                'mapping_version': get_current_time_str(),
-                'mapping_hash': mapping_data.get('mapping_hash', 'unknown')[:8]
-            })
+            save_model_version(model, 0, {})
             
     except Exception as e:
         logger.error(f"Error loading/creating global model: {e}")
@@ -514,11 +515,7 @@ def load_or_create_global_model():
         ).to(device)
         # Save initial model
         current_mapping = get_current_mapping()
-        save_model_version(model, 0, {
-            'num_identities': num_identities,
-            'mapping_version': get_current_time_str(),
-            'mapping_hash': hashlib.sha256(json.dumps(current_mapping).encode()).hexdigest()[:8]
-        })
+        save_model_version(model, 0, {})
     
     model.eval()  # Set to evaluation mode
     global_model = model
@@ -539,7 +536,12 @@ def aggregate_model_updates(updates: Dict[str, Dict]) -> Dict:
     
     # Normalize weights
     total_samples = sum(weights)
-    normalized_weights = [w / total_samples for w in weights]
+    if total_samples == 0:
+        # All clients reported zero samples – fall back to equal weighting
+        normalized_weights = [1.0 / len(weights)] * len(weights)
+        logger.warning("All client dataset_size values are 0; using equal weights for aggregation")
+    else:
+        normalized_weights = [w / total_samples for w in weights]
     
     # Perform weighted average
     avg_params = {}
@@ -553,7 +555,8 @@ def aggregate_model_updates(updates: Dict[str, Dict]) -> Dict:
     
     return avg_params
 
-def save_model_version(model: nn.Module, round_id: int, metrics: Dict) -> Path:
+# Typing: can return None if saving fails
+def save_model_version(model: nn.Module, round_id: int, metrics: Dict) -> Optional[Path]:
     """Save a version of the model with metadata"""
     try:
         # Create filename with round number
@@ -562,9 +565,19 @@ def save_model_version(model: nn.Module, round_id: int, metrics: Dict) -> Path:
         save_path = model_history_dir / filename
         
         # Get current mapping info
-        mapping = get_current_mapping()
-        mapping_size = len(mapping) if mapping else 0
-        mapping_hash = hashlib.sha256(json.dumps(sorted(mapping.items())).encode()).hexdigest()[:8] if mapping else None
+        mapping_wrapper = get_current_mapping()
+        if not mapping_wrapper:
+            raise ValueError("Global mapping not available")
+        
+        # Extract real mapping
+        if "identity_to_index" in mapping_wrapper:
+            server_mapping_dict = mapping_wrapper["identity_to_index"]
+        elif "mapping" in mapping_wrapper:
+            server_mapping_dict = mapping_wrapper["mapping"]
+        else:
+            server_mapping_dict = mapping_wrapper
+        mapping_size = len(server_mapping_dict)
+        mapping_hash = hashlib.sha256(json.dumps(sorted(server_mapping_dict.items())).encode()).hexdigest()[:8]
         
         # Save model with metadata
         save_dict = {
@@ -753,7 +766,17 @@ async def download_global_model():
     if not model_path.exists():
         # If model doesn't exist, create it
         global_model = load_or_create_global_model()
-        save_model_version(global_model, 0)
+        # Save a version and copy it to global_model.pth for easy download
+        saved_path = save_model_version(global_model, 0, {})
+        try:
+            if saved_path and saved_path.exists():
+                shutil.copy(saved_path, model_path)
+            else:
+                # Fallback: save minimal state dict
+                torch.save({"state_dict": global_model.state_dict()}, model_path)
+        except Exception as e:
+            logger.error(f"Failed to create global_model.pth: {e}")
+            raise HTTPException(status_code=500, detail="Failed to prepare global model file")
     
     return FileResponse(
         path=model_path,
@@ -782,15 +805,25 @@ async def notify_model_update(request: ModelUpdateRequest):
             raise HTTPException(status_code=400, detail=f"Invalid round ID. Expected {current_round.round_id}, got {request.round_id}")
         
         # Get current mapping size
-        mapping = get_current_mapping()
-        if not mapping:
+        mapping_wrapper = get_current_mapping()
+        if not mapping_wrapper:
             raise HTTPException(status_code=500, detail="Global mapping not available")
-        
-        # Verify mapping size matches
-        if request.mapping_size != len(mapping):
+
+        # Extract the actual mapping dict regardless of wrapper structure
+        if "identity_to_index" in mapping_wrapper:
+            server_mapping_dict = mapping_wrapper["identity_to_index"]
+        elif "mapping" in mapping_wrapper:
+            server_mapping_dict = mapping_wrapper["mapping"]
+        else:
+            server_mapping_dict = mapping_wrapper  # fallback – assume it *is* the mapping
+
+        server_mapping_size = len(server_mapping_dict)
+
+        # Verify mapping size in metadata
+        if request.mapping_size != server_mapping_size:
             raise HTTPException(
-                status_code=400, 
-                detail=f"Mapping size mismatch. Server has {len(mapping)} classes, client has {request.mapping_size}"
+                status_code=400,
+                detail=f"Mapping size mismatch. Server has {server_mapping_size} classes, client has {request.mapping_size}"
             )
         
         return {"success": True, "round_id": current_round.round_id}
@@ -805,6 +838,7 @@ async def notify_model_update(request: ModelUpdateRequest):
 async def upload_model_update(
     client_id: str,
     round_id: int,
+    background_tasks: BackgroundTasks,
     update: Dict = Body(...)
 ):
     """Upload model weights for federated learning"""
@@ -826,23 +860,43 @@ async def upload_model_update(
             raise HTTPException(status_code=400, detail=f"Invalid round ID. Expected {current_round.round_id}, got {round_id}")
         
         # Get current mapping size
-        mapping = get_current_mapping()
-        if not mapping:
+        mapping_wrapper = get_current_mapping()
+        if not mapping_wrapper:
             raise HTTPException(status_code=500, detail="Global mapping not available")
-        
+
+        # Extract the actual mapping dict regardless of wrapper structure
+        if "identity_to_index" in mapping_wrapper:
+            server_mapping_dict = mapping_wrapper["identity_to_index"]
+        elif "mapping" in mapping_wrapper:
+            server_mapping_dict = mapping_wrapper["mapping"]
+        else:
+            server_mapping_dict = mapping_wrapper  # fallback – assume it *is* the mapping
+
+        server_mapping_size = len(server_mapping_dict)
+
         # Verify mapping size in metadata
-        if update.get("mapping_size") != len(mapping):
+        if update.get("mapping_size") != server_mapping_size:
             raise HTTPException(
                 status_code=400,
-                detail=f"Mapping size mismatch. Server has {len(mapping)} classes, client has {update.get('mapping_size')}"
+                detail=f"Mapping size mismatch. Server has {server_mapping_size} classes, client has {update.get('mapping_size')}"
             )
         
+        # Decode base64-encoded weights back into a state_dict
+        try:
+            decoded_bytes = base64.b64decode(update["weights"])
+            buffer = io.BytesIO(decoded_bytes)
+            state_dict = torch.load(buffer, map_location=torch.device('cpu'))
+        except Exception as e:
+            logger.error(f"Failed to decode model weights from client {client_id}: {e}")
+            raise HTTPException(status_code=400, detail="Invalid model weights format")
+
         # Store update
         client_updates[client_id] = {
-            "parameters": update["weights"],
+            "parameters": state_dict,
             "dataset_size": registered_clients[client_id].dataset_size,
             "timestamp": get_current_time(),
-            "mapping_size": update["mapping_size"]
+            "mapping_size": update["mapping_size"],
+            "mapping_hash": update.get("mapping_hash")
         }
         
         # Add client to active clients list
@@ -866,16 +920,27 @@ async def aggregate_and_update_model():
     """Aggregate client updates and update the global model"""
     global global_model, client_updates, current_round
     
+    # Runtime safety: ensure required globals are set (helps both mypy & runtime)
+    assert global_model is not None, "Global model not initialized"
+    assert current_round is not None, "Current round not initialized"
+
     logger.info(f"Starting model aggregation for round {current_round.round_id}")
     
     try:
         # Verify mapping consistency
-        mapping = get_current_mapping()
-        if not mapping:
+        mapping_wrapper = get_current_mapping()
+        if not mapping_wrapper:
             raise ValueError("Global mapping not available")
         
-        mapping_size = len(mapping)
-        mapping_hash = hashlib.sha256(json.dumps(sorted(mapping.items())).encode()).hexdigest()[:8]
+        # Extract real mapping
+        if "identity_to_index" in mapping_wrapper:
+            server_mapping_dict = mapping_wrapper["identity_to_index"]
+        elif "mapping" in mapping_wrapper:
+            server_mapping_dict = mapping_wrapper["mapping"]
+        else:
+            server_mapping_dict = mapping_wrapper
+        mapping_size = len(server_mapping_dict)
+        mapping_hash = hashlib.sha256(json.dumps(sorted(server_mapping_dict.items())).encode()).hexdigest()[:8]
         
         # Verify all clients have correct mapping size and version
         for client_id, update in client_updates.items():
@@ -1169,7 +1234,7 @@ async def add_user_to_mapping(request: Dict = Body(...)):
         raise HTTPException(status_code=500, detail=f"Failed to add user to mapping: {str(e)}")
 
 @app.get("/api/mapping/debug")
-async def debug_mapping():
+async def debug_mapping(request: Request):
     """Debug endpoint to view the current mapping status"""
     try:
         # Get client ID from headers

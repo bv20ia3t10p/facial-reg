@@ -3,14 +3,12 @@ import { UserOutlined, SmileOutlined, BarChartOutlined, BellOutlined } from '@an
 import { useState, useEffect } from 'react';
 import { api } from '../services/api';
 import type { User, VerificationRequest } from '../types';
-import { AddUserModal } from './AddUserModal';
 import { VerificationRequestsTable } from './VerificationRequestsTable';
 
 const { Title } = Typography;
 const { TabPane } = Tabs;
 
 export function HRDashboard() {
-  const [isAddUserModalVisible, setIsAddUserModalVisible] = useState(false);
   const [pendingRequests, setPendingRequests] = useState<VerificationRequest[]>([]);
   const [activeTab, setActiveTab] = useState('verification');
   const [loading, setLoading] = useState(false);
@@ -57,23 +55,14 @@ export function HRDashboard() {
           <Title level={2}>HR Dashboard</Title>
         </Col>
         <Col>
-          <Space>
-            <Badge count={pendingRequests.length} offset={[-8, 0]}>
-              <Button 
-                icon={<BellOutlined />}
-                onClick={() => setActiveTab('verification')}
-              >
-                Pending Requests
-              </Button>
-            </Badge>
+          <Badge count={pendingRequests.length} offset={[-8, 0]}>
             <Button 
-              type="primary" 
-              icon={<UserOutlined />}
-              onClick={() => setIsAddUserModalVisible(true)}
+              icon={<BellOutlined />}
+              onClick={() => setActiveTab('verification')}
             >
-              Add New User
+              Pending Requests
             </Button>
-          </Space>
+          </Badge>
         </Col>
       </Row>
 
@@ -161,10 +150,7 @@ export function HRDashboard() {
         </Tabs>
       </Card>
 
-      <AddUserModal 
-        visible={isAddUserModalVisible}
-        onClose={() => setIsAddUserModalVisible(false)}
-      />
+
     </Space>
   );
 } 
