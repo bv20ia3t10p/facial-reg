@@ -3,10 +3,9 @@ Emotion service for handling facial emotion analysis
 """
 
 import logging
-import aiohttp
-import json
-from typing import Dict, Any
 import os
+import httpx
+from typing import Dict
 
 # Configure logging
 logging.basicConfig(level=logging.INFO)
@@ -15,54 +14,57 @@ logger = logging.getLogger(__name__)
 class EmotionService:
     def __init__(self):
         """Initialize the emotion service"""
-        self.analyzer = EmotionAnalyzer()
-        logger.info("Emotion service initialized")
-    
-    async def analyze_emotion(self, image_data: bytes) -> Dict[str, float]:
-        """Analyze emotions in an image"""
-        return await self.analyzer.analyze_emotion(image_data)
+        self.api_url = os.getenv('EMOTION_API_URL')
+        if not self.api_url:
+            logger.error("EMOTION_API_URL environment variable not set. Using default.")
+            self.api_url = 'http://emotion-api:8080'
+        
+        http2_disabled = httpx.Client(http2=False)
+        self.client = httpx.AsyncClient(timeout=10.0, base_url=self.api_url, transport=httpx.AsyncHTTPTransport(http2=False))
+        logger.info(f"Emotion service initialized to use API at: {self.api_url}")
 
-class EmotionAnalyzer:
-    def __init__(self):
-        """Initialize the emotion analyzer"""
-        self.api_url = os.getenv('EMOTION_API_URL', 'http://emotion-api:8080')
-        logger.info(f"Emotion analyzer initialized with API URL: {self.api_url}")
-    
-    async def analyze_emotion(self, image_data: bytes) -> Dict[str, float]:
-        """Analyze emotions in an image using the emotion API"""
+    async def detect_emotion(self, image_data: bytes) -> Dict[str, float]:
+        """Detect emotions in an image by calling the external emotion API."""
         try:
-            endpoint = f"{self.api_url}/predict"
-            logger.info(f"Calling emotion API at: {endpoint}")
+            files = {'file': ('image.jpg', image_data, 'image/jpeg')}
             
-            # Create form data with proper file upload format
-            form_data = aiohttp.FormData()
-            form_data.add_field('file', image_data, content_type='image/jpeg', filename='image.jpg')
+            logger.info(f"Calling emotion API at: {self.client.base_url}/predict")
             
-            timeout = aiohttp.ClientTimeout(total=30)  # 30 second timeout
+            response = await self.client.post("/predict", files=files)
+            response.raise_for_status() 
             
-            async with aiohttp.ClientSession(timeout=timeout) as session:
-                async with session.post(endpoint, data=form_data) as response:
-                    if response.status == 200:
-                        result = await response.json()
-                        logger.info(f"Emotion API response: {result}")
-                        
-                        # The emotion API returns the emotions directly, not nested in 'emotions' key
-                        # Filter out non-emotion fields like 'reliability'
-                        emotion_fields = ['neutral', 'happiness', 'surprise', 'sadness', 'anger', 'disgust', 'fear']
-                        emotions = {key: value for key, value in result.items() if key in emotion_fields}
-                        
-                        if not emotions:
-                            logger.warning("No valid emotion data in response, using full result")
-                            emotions = result
-                            
-                        return emotions
-                    else:
-                        error_text = await response.text()
-                        logger.error(f"Emotion API error: {response.status} - {error_text}")
-                        return {}
-        except aiohttp.ClientError as e:
+            result = response.json()
+            logger.info(f"Emotion API response: {result}")
+
+            emotion_fields = ['neutral', 'happiness', 'surprise', 'sadness', 'anger', 'disgust', 'fear']
+            emotions = {key: value for key, value in result.items() if key in emotion_fields}
+            
+            if not emotions:
+                logger.warning("No valid emotion data in API response.")
+                return {}
+                
+            return emotions
+
+        except httpx.HTTPStatusError as e:
+            logger.error(f"Emotion API returned an error: {e.response.status_code} - {e.response.text}")
+            return {}
+        except httpx.RequestError as e:
             logger.error(f"HTTP client error calling emotion API: {e}")
             return {}
         except Exception as e:
-            logger.error(f"Failed to analyze emotion: {e}")
-            return {} 
+            logger.error(f"An unexpected error occurred in detect_emotion: {e}", exc_info=True)
+            return {}
+
+# You might not need the EmotionAnalyzer class if the service is just a client
+# to an external API. I'm leaving it here for now but it seems unused.
+class EmotionAnalyzer:
+    def __init__(self):
+        """Initialize a local emotion analyzer."""
+        # This part would contain logic for a local model if you had one.
+        # For now, it does nothing as we are using an external API.
+        pass
+
+    async def analyze_emotion(self, image_data: bytes) -> Dict[str, float]:
+        """Placeholder for local emotion analysis."""
+        logger.warning("Local EmotionAnalyzer.analyze_emotion is not implemented. Returning empty dict.")
+        return {} 

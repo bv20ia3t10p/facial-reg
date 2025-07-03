@@ -18,7 +18,7 @@ from ..services.mapping_service import MappingService
 logger = logging.getLogger(__name__)
 
 class IdentityPredictionService:
-    def __init__(self, model_path: str, client_id: str = None):
+    def __init__(self, model_path: str, client_id: Optional[str] = None):
         self.model_path = Path(model_path)
         self.client_id = client_id or "client1"  # Default to client1
         self.model = None
@@ -40,7 +40,7 @@ class IdentityPredictionService:
             # Get number of identities from final layer
             num_identities = None
             for key in state_dict:
-                if 'identity_head.4.weight' in key:
+                if 'identity_classifier.weight' in key:
                     num_identities = state_dict[key].shape[0]
                     break
             
@@ -84,7 +84,7 @@ class IdentityPredictionService:
             
             # Get predictions
             with torch.no_grad():
-                logits = self.model.identity_head(embeddings)
+                logits = self.model.identity_classifier(embeddings)
                 probs = torch.nn.functional.softmax(logits, dim=1)
             
             # Get top k predictions
@@ -144,7 +144,7 @@ class IdentityPredictionService:
             
             # Get predictions
             with torch.no_grad():
-                logits = self.model.identity_head(embeddings)
+                logits = self.model.identity_classifier(embeddings)
                 probs = torch.nn.functional.softmax(logits, dim=1)
             
             # Get probability for claimed identity
@@ -232,6 +232,7 @@ class IdentityPredictor:
             
             # Get identity prediction
             with torch.no_grad():
+                assert callable(self.model.identity_classifier)
                 identity_logits = self.model.identity_classifier(features)
                 probabilities = F.softmax(identity_logits, dim=1)[0]
                 

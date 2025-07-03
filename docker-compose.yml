@@ -8,7 +8,7 @@ services:
       dockerfile: Dockerfile.coordinator
     container_name: fl-coordinator
     ports:
-      - "9000:8000"
+      - "9000:8080"
     environment:
       - PYTHONPATH=/app
       - TORCH_HOME=/app/cache/torch
@@ -40,7 +40,7 @@ services:
         - CLIENT_ID=client1
     container_name: client1-biometric-api
     ports:
-      - "8000:8000"
+      - "8080:8080"
     environment:
       - PYTHONPATH=/app
       - TORCH_HOME=/app/cache/torch
@@ -63,9 +63,8 @@ services:
       - RELOAD=true
       - NODE_TYPE=client
       - CLIENT_ID=client1
-      - COORDINATOR_URL=http://fl-coordinator:8000
+      - SERVER_URL=http://fl-coordinator:8080
       - IS_SERVER=false
-      - SERVER_URL=http://fl-coordinator:8000
       - NUM_IDENTITIES=300
     command: uvicorn api.src.app:app --host 0.0.0.0 --reload
     deploy:
@@ -91,7 +90,7 @@ services:
         - CLIENT_ID=client2
     container_name: client2-biometric-api
     ports:
-      - "8001:8000"
+      - "8001:8080"
     environment:
       - PYTHONPATH=/app
       - TORCH_HOME=/app/cache/torch
@@ -114,9 +113,8 @@ services:
       - RELOAD=true
       - NODE_TYPE=client
       - CLIENT_ID=client2
-      - COORDINATOR_URL=http://fl-coordinator:8000
+      - SERVER_URL=http://fl-coordinator:8080
       - IS_SERVER=false
-      - SERVER_URL=http://fl-coordinator:8000
       - NUM_IDENTITIES=300
     command: uvicorn api.src.app:app --host 0.0.0.0 --reload
     deploy:

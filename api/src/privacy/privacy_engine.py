@@ -115,6 +115,8 @@ class PrivacyEngine:
         if not self._ensure_context() or not isinstance(encrypted_features, ts.CKKSTensor):
             # If not encrypted or context not available, treat as raw bytes
             try:
+                # Add type assertion for the linter
+                assert isinstance(encrypted_features, bytes)
                 features_np = np.frombuffer(encrypted_features, dtype=np.float32)
                 return torch.from_numpy(features_np)
             except Exception as e:
@@ -155,21 +157,19 @@ class PrivacyEngine:
                 target_epsilon=self.epsilon,
                 target_delta=self.delta,
                 max_grad_norm=self.max_grad_norm,
-                epochs=kwargs.get('epochs', 1),
-                noise_multiplier=self.noise_multiplier
+                epochs=kwargs.get('epochs', 1)
             )
             
             logger.info(f"✓ Differential privacy setup complete with: "
                        f"epsilon={self.epsilon}, delta={self.delta}, "
-                       f"max_grad_norm={self.max_grad_norm}, "
-                       f"noise_multiplier={self.noise_multiplier}")
+                       f"max_grad_norm={self.max_grad_norm}")
             return model, optimizer, data_loader
             
         except Exception as e:
             logger.error(f"DP setup failed: {e}")
             raise
     
-    def compute_privacy_spent(self) -> Dict[str, float]:
+    def compute_privacy_spent(self) -> Dict[str, Union[float, str]]:
         """Compute current privacy budget spent"""
         try:
             if self.dp_engine is None:
@@ -219,7 +219,7 @@ class PrivacyEngine:
             }
         }
     
-    async def get_privacy_budget(self) -> Dict[str, float]:
+    async def get_privacy_budget(self) -> Dict[str, Union[float, str]]:
         """Get current privacy budget status"""
         try:
             privacy_spent = self.compute_privacy_spent()

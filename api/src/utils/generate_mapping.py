@@ -5,7 +5,7 @@ Mapping utilities for biometric service
 import os
 import logging
 from pathlib import Path
-from typing import Dict, List
+from typing import Dict, List, Optional
 from sqlalchemy import create_engine, text
 
 # Configure logging
@@ -44,7 +44,7 @@ def get_client_databases():
     
     return client_dbs
 
-def generate_class_mapping(client_id: str = None) -> Dict[str, str]:
+def generate_class_mapping(client_id: Optional[str] = None) -> Dict[str, str]:
     """
     Generate class-to-user mapping from partitioned data directories
     
@@ -104,7 +104,7 @@ def generate_class_mapping(client_id: str = None) -> Dict[str, str]:
         logger.error(f"Error generating class mapping: {e}")
         return {}
 
-def validate_mapping_with_db(existing_mapping_service=None):
+def get_and_validate_mapping(existing_mapping_service=None):
     """
     Validate server mapping against database
     
@@ -120,12 +120,12 @@ def validate_mapping_with_db(existing_mapping_service=None):
             mapping_service = existing_mapping_service
         else:
             from ..services.mapping_service import MappingService
-            server_url = os.getenv("SERVER_URL", "http://fl-coordinator:8000")
-            mapping_service = MappingService(server_url, client_id)
+            server_url = os.getenv("SERVER_URL", "http://fl-coordinator:8080")
+            mapping_service = MappingService() # constructor doesn't take args anymore
         
         # Initialize mapping from directory structure
         mapping_service.initialize_mapping()
-        mapping = mapping_service.cached_mapping
+        mapping = mapping_service.get_mapping()
         
         if not mapping:
             logger.error("Failed to get mapping from server")
@@ -135,9 +135,9 @@ def validate_mapping_with_db(existing_mapping_service=None):
         return True
         
     except Exception as e:
-        logger.error(f"Error validating mapping with database: {e}")
+        logger.error(f"Error validating mapping: {e}", exc_info=True)
         return False
 
 if __name__ == "__main__":
     logger.info("Validating and updating user ID mapping")
-    validate_mapping_with_db() 
+    get_and_validate_mapping() 

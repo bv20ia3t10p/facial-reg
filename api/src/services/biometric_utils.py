@@ -5,17 +5,27 @@ Utility functions for biometric service
 import logging
 from pathlib import Path
 from datetime import datetime
-from typing import Dict, Any, List
+from typing import Dict, Any, List, Callable
 import os
 import torch
+import torch.nn as nn
 import torch.nn.functional as F
+
+from .mapping_service import MappingService
 
 # Configure logging
 logger = logging.getLogger(__name__)
 
 class BiometricUtilsMixin:
     """Utility methods for biometric service"""
-    
+    # Declare attributes from BiometricService to inform the linter
+    client_id: str
+    mapping_service: MappingService
+    device: torch.device
+    model: nn.Module
+    initialized: bool
+    preprocess_image: Callable[[bytes], torch.Tensor]
+
     def debug_mapping(self):
         """Print detailed mapping information for debugging"""
         logger.info("============ BIOMETRIC SERVICE MAPPING DEBUG ============")
@@ -55,7 +65,7 @@ class BiometricUtilsMixin:
             
         # Check server connectivity
         try:
-            is_server_available = self.mapping_service.fetch_mapping_from_server()
+            is_server_available = self.mapping_service.initialize_mapping()
             logger.info(f"Mapping server connectivity: {'OK' if is_server_available else 'UNAVAILABLE'}")
         except Exception as e:
             logger.error(f"Error checking server connectivity: {e}")

@@ -227,7 +227,7 @@ def notify_coordinator_new_user(user_id: str) -> bool:
         import requests
         import os
         
-        coordinator_url = os.getenv("SERVER_URL", "http://fl-coordinator:8000")
+        coordinator_url = os.getenv("SERVER_URL", "http://fl-coordinator:8080")
         
         # Try to notify coordinator about new user
         response = requests.post(

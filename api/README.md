@@ -25,7 +25,7 @@ cd api
 
 2. Run the API server:
 ```bash
-uvicorn src.app:app --host 0.0.0.0 --port 8000 --reload
+uvicorn src.app:app --host 0.0.0.0 --port 8080 --reload
 ```
 
 Or use the Python entry point:

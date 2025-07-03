@@ -15,6 +15,7 @@ from PIL import Image
 from torchvision import transforms
 import torch.nn.functional as F
 import matplotlib.pyplot as plt
+import torch.nn as nn
 
 from .mapping_service import MappingService
 from ..models.privacy_biometric_model import PrivacyBiometricModel
@@ -43,9 +44,9 @@ class BiometricService(BiometricUtilsMixin):
         self.initialized = False
         
         try:
-            # Force CPU usage regardless of CUDA availability
-            self.device = torch.device('cpu')
-            logger.info("Using CPU for computations (forced)")
+            # Configure device
+            self.device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
+            logger.info(f"Using {'GPU' if self.device.type == 'cuda' else 'CPU'} for computations")
         
             # Load model
             self.model_loader = BiometricModelLoader(self.client_id, self.device)
@@ -98,6 +99,26 @@ class BiometricService(BiometricUtilsMixin):
             logger.error(f"Failed to reload biometric model: {e}")
             return False
     
+    def update_model(self, new_model: nn.Module):
+        """Update the service with a new model instance."""
+        try:
+            logger.info("Updating biometric service with a new model...")
+            self.model = new_model
+            # Re-initialize components that depend on the model
+            self.feature_extractor = FeatureExtractor(self.model, self.device)
+            self.identity_predictor = IdentityPredictor(
+                self.model, 
+                self.mapping_service,
+                self.feature_extractor,
+                self.device,
+                client_id=self.client_id
+            )
+            logger.info("Biometric service updated successfully with new model.")
+            return True
+        except Exception as e:
+            logger.error(f"Failed to update biometric model: {e}", exc_info=True)
+            return False
+    
     def preprocess_image(self, image_data: bytes) -> torch.Tensor:
         """Preprocess image for model input"""
         try:
@@ -124,7 +145,7 @@ class BiometricService(BiometricUtilsMixin):
         """
         try:
             # Fetch the mapping from server
-            success = self.mapping_service.fetch_mapping_from_server()
+            success = self.mapping_service.initialize_mapping()
             
             if success:
                 logger.info("Successfully fetched mapping from server")
@@ -315,7 +336,7 @@ class BiometricService(BiometricUtilsMixin):
                 else:
                     logger.warning(f"Predicted user {original_user_id} not found in mapping either")
                     # Only use fallback as last resort if absolutely needed
-                    if self.model.num_identities > 0:  # If model has identities, trust its prediction
+                    if getattr(self.model, 'num_identities', 0) > 0:  # If model has identities, trust its prediction
                         logger.info(f"Using model's prediction: {original_user_id}")
                         return original_user_id
                     else:
@@ -399,7 +420,7 @@ class BiometricService(BiometricUtilsMixin):
             
         # Check server connectivity
         try:
-            is_server_available = self.mapping_service.fetch_mapping_from_server()
+            is_server_available = self.mapping_service.initialize_mapping()
             logger.info(f"Mapping server connectivity: {'OK' if is_server_available else 'UNAVAILABLE'}")
         except Exception as e:
             logger.error(f"Error checking server connectivity: {e}")
@@ -454,6 +475,9 @@ class BiometricService(BiometricUtilsMixin):
                 return []
                 
             if image_tensor is None:
+                if image_data is None:
+                    logger.error("get_top_predictions called with no image data.")
+                    return []
                 image_tensor = self.preprocess_image(image_data)
                 
             # Get predictions directly from model
@@ -467,7 +491,7 @@ class BiometricService(BiometricUtilsMixin):
                 # Convert to list of dictionaries
                 results = []
                 for i, (conf, idx) in enumerate(zip(top_confidences, top_indices)):
-                    class_idx = idx.item()
+                    class_idx = int(idx.item())
                     user_id = self.mapping_service.get_identity_by_model_class(class_idx, use_filtered=True)
                     results.append({
                         "rank": i+1,

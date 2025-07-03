@@ -10,6 +10,7 @@ import numpy as np
 import matplotlib.pyplot as plt
 from pathlib import Path
 from datetime import datetime
+from typing import Optional
 
 # Configure logging
 logger = logging.getLogger(__name__)
@@ -53,7 +54,7 @@ class FeatureExtractor:
             if "CUDA" in str(e):
                 logger.error(f"CUDA error during feature extraction: {e}")
                 # Fallback to CPU if CUDA fails
-                self.device = torch.device('cpu')
+                self.device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
                 self.model = self.model.to(self.device)
                 logger.info("Model moved to CPU due to CUDA error")
                 # Retry on CPU
@@ -64,7 +65,7 @@ class FeatureExtractor:
         """Get the feature dimension"""
         return self.feature_dim
     
-    def visualize_features(self, features: torch.Tensor, save_path: str = None):
+    def visualize_features(self, features: torch.Tensor, save_path: Optional[str] = None):
         """Visualize feature embeddings (for debugging)"""
         try:
             # Convert features to numpy
@@ -83,9 +84,9 @@ class FeatureExtractor:
                 debug_dir = Path("/app/logs/debug_features")
                 debug_dir.mkdir(parents=True, exist_ok=True)
                 timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
-                save_path = debug_dir / f"features_{timestamp}.png"
-                plt.savefig(save_path)
-                logger.info(f"Feature visualization saved to {save_path}")
+                output_path = debug_dir / f"features_{timestamp}.png"
+                plt.savefig(output_path)
+                logger.info(f"Feature visualization saved to {output_path}")
             else:
                 plt.close()
             
@@ -116,11 +117,13 @@ class FeatureExtractor:
             image_tensor.requires_grad_(True)
             
             # Get backbone features
+            assert callable(self.model.backbone)
             backbone_features = self.model.backbone(image_tensor)
             logger.info(f"Backbone output shape: {backbone_features.shape}")
             
             # Get pooled features if applicable
             if hasattr(self.model, 'adaptive_pool'):
+                assert callable(self.model.adaptive_pool)
                 pooled_features = self.model.adaptive_pool(backbone_features)
                 logger.info(f"Pooled features shape: {pooled_features.shape}")
             else:
@@ -133,6 +136,7 @@ class FeatureExtractor:
             
             # Get final embedding if applicable
             if hasattr(self.model, 'embedding'):
+                assert callable(self.model.embedding)
                 embedding = self.model.embedding(flattened)
                 logger.info(f"Final embedding shape: {embedding.shape}")
             else:
@@ -194,7 +198,8 @@ class FeatureExtractor:
             # Compute gradients for feature importance
             try:
                 # Get prediction
-                identity_logits, _ = self.model(embedding)
+                assert callable(self.model.identity_classifier)
+                identity_logits = self.model.identity_classifier(embedding)
                 
                 # Get the predicted class
                 pred_class = torch.argmax(identity_logits, dim=1).item()

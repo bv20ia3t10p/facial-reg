@@ -52,4 +52,4 @@ COPY data/partitioned/${CLIENT_ID} /app/data/partitioned/${CLIENT_ID}
 COPY data/identity_mapping.json /app/data/
 
 # Run setup script and then start the application
-CMD ["sh", "-c", "python api/scripts/setup_models_and_mapping.py && uvicorn api.src.app:app --host 0.0.0.0 --port 8000 --reload"] 
+CMD ["sh", "-c", "python api/scripts/setup_models_and_mapping.py && uvicorn api.src.app:app --host 0.0.0.0 --port 8080 --reload"] 

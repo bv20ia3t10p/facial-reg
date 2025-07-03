@@ -8,7 +8,8 @@ import torch.nn as nn
 import torch.nn.functional as F
 import logging
 import os
-from typing import Dict
+from typing import Dict, Tuple, Any
+from torchvision import models
 
 logger = logging.getLogger(__name__)
 
@@ -67,140 +68,131 @@ class BasicBlock(nn.Module):
 
 class PrivacyBiometricModel(nn.Module):
     """Privacy-Enabled Biometric Model"""
-    def __init__(self, num_identities, privacy_enabled=False, embedding_dim=512):
-        super().__init__()
-        self.device = get_device()
-        logger.info(f"Initializing model on device: {self.device}")
+    def __init__(self, num_identities: int, embedding_dim: int = 512, privacy_enabled: bool = False):
+        """
+        Initialize the model
         
-        # Initial layers
-        self.backbone = nn.Sequential(
-            # Initial conv layer
-            nn.Conv2d(3, 64, kernel_size=7, stride=2, padding=3, bias=False),
-            nn.BatchNorm2d(64),
-            nn.ReLU(inplace=True),
-            nn.MaxPool2d(kernel_size=3, stride=2, padding=1),
-            
-            # Layer 4 (64 -> 64)
-            nn.Sequential(
-                BasicBlock(64, 64),  # 4.0
-                BasicBlock(64, 64)   # 4.1
-            ),
-            
-            # Layer 5 (64 -> 128)
-            nn.Sequential(
-                BasicBlock(64, 128, stride=2),  # 5.0
-                BasicBlock(128, 128)            # 5.1
-            ),
-            
-            # Layer 6 (128 -> 256)
-            nn.Sequential(
-                BasicBlock(128, 256, stride=2),  # 6.0
-                BasicBlock(256, 256)             # 6.1
-            ),
-            
-            # Layer 7 (256 -> 512)
-            nn.Sequential(
-                BasicBlock(256, 512, stride=2),  # 7.0
-                BasicBlock(512, 512)             # 7.1
-            ),
-            
-            # Final pooling
-            nn.AdaptiveAvgPool2d((1, 1))
-        )
-        
-        # Move backbone to device first
-        self.backbone = self.backbone.to(self.device)
-        
-        # Freeze early layers to prevent overfitting
-        layers_to_freeze = 6  # Freeze first 6 layers
-        for i, (name, param) in enumerate(self.backbone.named_parameters()):
-            if i < layers_to_freeze:
-                param.requires_grad = False
-        
-        # Output dimension is 512 (matches ResNet18/34)
-        self.backbone_output_dim = 512
+        Args:
+            num_identities: Number of identities for classification
+            embedding_dim: Dimension of the embedding vector
+            privacy_enabled: Whether to enable privacy features
+        """
+        super(PrivacyBiometricModel, self).__init__()
+        self.num_identities = num_identities
         self.embedding_dim = embedding_dim
+        self.privacy_enabled = privacy_enabled
         
-        # Add custom layers for biometric features
-        self.feature_layer = nn.Sequential(
+        self.backbone = self._create_backbone()
+        self.backbone_output_dim = self._get_backbone_output_dim()
+        
+        # Determine the device
+        self.device = self.get_default_device()
+        
+        # Initialize embedding and identity head
+        self.embedding = nn.Sequential(
             nn.Linear(self.backbone_output_dim, self.embedding_dim),
             nn.BatchNorm1d(self.embedding_dim),
             nn.ReLU(inplace=True),
             nn.Dropout(0.5)
-        ).to(self.device)
+        )
+        self.identity_classifier = nn.Linear(self.embedding_dim, self.num_identities)
+
+        # Move to device
+        self.to(self.device)
+        self._init_weights()
         
-        # Identity classification head
-        self.identity_head = nn.Sequential(
-            nn.Linear(self.embedding_dim, 256),
-            nn.BatchNorm1d(256),
-            nn.ReLU(inplace=True),
-            nn.Dropout(0.3),
-            nn.Linear(256, num_identities)
-        ).to(self.device)
+    def _create_backbone(self) -> nn.Module:
+        """Creates the backbone model (e.g., MobileNetV3)"""
+        # Load a pre-trained MobileNetV3 Large model
+        model = models.mobilenet_v3_large(weights=models.MobileNet_V3_Large_Weights.IMAGENET1K_V1)
         
-        self.privacy_enabled = privacy_enabled
-        self.num_identities = num_identities
+        # Remove the original classifier by replacing it with an identity mapping
+        model.classifier = nn.Sequential(
+            nn.Identity()
+        )
         
-        # Initialize weights properly
-        self._initialize_weights()
+        return model
         
-        # Set model to evaluation mode by default
-        self.eval()
+    def _get_backbone_output_dim(self) -> int:
+        """Get the output dimension of the backbone"""
+        # Create a dummy tensor and pass it through the backbone
+        dummy_input = torch.randn(1, 3, 224, 224).to(self.get_default_device())
         
-        logger.info(f"Model initialization complete with backbone output dim: {self.backbone_output_dim}, embedding dim: {self.embedding_dim}")
-    
-    def _initialize_weights(self):
-        """Initialize model weights for better convergence"""
+        # Ensure backbone is on the correct device
+        backbone = self._create_backbone().to(self.get_default_device())
+        
+        with torch.no_grad():
+            output = backbone(dummy_input)
+            
+        return output.shape[1]
+
+    def _init_weights(self):
+        """Initialize model weights"""
         for m in self.modules():
-            if isinstance(m, nn.Linear):
-                nn.init.xavier_normal_(m.weight)
+            if isinstance(m, nn.Conv2d):
+                nn.init.kaiming_normal_(m.weight, mode='fan_out', nonlinearity='relu')
                 if m.bias is not None:
                     nn.init.constant_(m.bias, 0)
-            elif isinstance(m, nn.BatchNorm1d):
-                nn.init.constant_(m.weight, 1)
-                nn.init.constant_(m.bias, 0)
-            elif isinstance(m, nn.Conv2d):
-                nn.init.kaiming_normal_(m.weight, mode='fan_out', nonlinearity='relu')
             elif isinstance(m, nn.BatchNorm2d):
                 nn.init.constant_(m.weight, 1)
                 nn.init.constant_(m.bias, 0)
+            elif isinstance(m, nn.Linear):
+                nn.init.normal_(m.weight, 0, 0.01)
+                nn.init.constant_(m.bias, 0)
+
+    def get_default_device(self):
+        """Get default device, preferring CUDA if available"""
+        if torch.cuda.is_available():
+            return torch.device('cuda')
+        # Check for Apple Metal Performance Shaders (MPS)
+        elif hasattr(torch.backends, 'mps') and torch.backends.mps.is_available():
+            return torch.device('mps')
+        else:
+            return torch.device('cuda' if torch.cuda.is_available() else 'cpu')
+
+    def forward(self, x: torch.Tensor) -> Tuple[torch.Tensor, torch.Tensor]:
+        """
+        Pass input through the backbone
+        
+        Args:
+            x: Input tensor
+        
+        Returns:
+            identity_logits: Logits for identity classification
+            embeddings: Extracted feature embeddings
+        """
+        # Pass input through the backbone
+        backbone_features = self.backbone(x)
+        
+        # Adaptive pooling and flatten
+        pooled_features = F.adaptive_avg_pool2d(backbone_features, (1, 1))
+        flattened_features = pooled_features.view(pooled_features.size(0), -1)
+        
+        # Get embeddings
+        embeddings = self.embedding(flattened_features)
+        
+        # Get identity logits
+        identity_logits = self.identity_classifier(embeddings)
+        
+        return identity_logits, embeddings
     
-    def forward(self, x, add_noise=False, node_id=None):
-        try:
-            # Ensure input is on the correct device
-            if not x.is_cuda and self.device.type == 'cuda':
-                x = x.to(self.device)
-                logger.debug(f"Moved input tensor to {self.device}")
-            
-            # Extract features through backbone
-            features = self.backbone(x)
-            features = features.view(features.size(0), -1)
-            
-            # Apply feature extraction
-            features = self.feature_layer(features)
-            
-            # Add privacy noise if enabled
-            if self.privacy_enabled and add_noise:
-                noise_scale = 0.1
-                noise = torch.randn_like(features, device=self.device) * noise_scale
-                features = features + noise
-            
-            # Identity classification
-            identity_logits = self.identity_head(features)
-            
-            return identity_logits, features
-            
-        except RuntimeError as e:
-            if "CUDA" in str(e):
-                logger.error(f"CUDA error during forward pass: {e}")
-                # Fallback to CPU if CUDA fails
-                self.device = torch.device('cpu')
-                self.to(self.device)
-                logger.info("Model moved to CPU due to CUDA error")
-                # Retry forward pass on CPU
-                return self.forward(x.to(self.device), add_noise, node_id)
-            raise
-    
+    def get_model_summary(self) -> Dict[str, Any]:
+        """
+        Get a summary of the model including architecture and parameters
+        """
+        total_params = sum(p.numel() for p in self.parameters())
+        trainable_params = sum(p.numel() for p in self.parameters() if p.requires_grad)
+        
+        return {
+            "architecture": "PrivacyBiometricModel (MobileNetV3 Large)",
+            "num_identities": self.num_identities,
+            "embedding_dim": self.embedding_dim,
+            "privacy_enabled": self.privacy_enabled,
+            "total_params": total_params,
+            "trainable_params": trainable_params,
+            "model_size_mb": total_params * 4 / (1024 * 1024)
+        }
+
     def get_feature_embeddings(self, x: torch.Tensor) -> torch.Tensor:
         """Extract feature embeddings without classification"""
         try:
@@ -211,7 +203,7 @@ class PrivacyBiometricModel(nn.Module):
                 
                 backbone_features = self.backbone(x)
                 features = backbone_features.view(backbone_features.size(0), -1)
-                features = self.feature_layer(features)
+                features = self.embedding(features)
             return features
         except RuntimeError as e:
             if "CUDA" in str(e):
@@ -226,22 +218,22 @@ class PrivacyBiometricModel(nn.Module):
             
     def expand_for_new_identity(self, new_identity_count: int = 1):
         """Expand model to accommodate new identities"""
-        old_num_identities = self.identity_head[-1].out_features
+        old_num_identities = self.identity_classifier.out_features
         new_num_identities = old_num_identities + new_identity_count
         
         # Create new classifier with expanded output
-        new_classifier = nn.Linear(256, new_num_identities)
+        new_classifier = nn.Linear(self.embedding_dim, new_num_identities)
         
         # Copy existing weights
-        new_classifier.weight.data[:old_num_identities] = self.identity_head[-1].weight.data
-        new_classifier.bias.data[:old_num_identities] = self.identity_head[-1].bias.data
+        new_classifier.weight.data[:old_num_identities] = self.identity_classifier.weight.data
+        new_classifier.bias.data[:old_num_identities] = self.identity_classifier.bias.data
         
         # Initialize new identity weights
         nn.init.xavier_normal_(new_classifier.weight.data[old_num_identities:])
         nn.init.zeros_(new_classifier.bias.data[old_num_identities:])
         
         # Replace the classifier
-        self.identity_head[-1] = new_classifier
+        self.identity_classifier = new_classifier
         self.num_identities = new_num_identities
         
         print(f"Model expanded from {old_num_identities} to {new_num_identities} identities")

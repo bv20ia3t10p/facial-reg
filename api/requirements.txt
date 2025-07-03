@@ -51,4 +51,7 @@ pytest-cov==4.1.0
 natsort==8.4.0
 
 # Data Generation
-Faker==19.13.0 
+Faker==19.13.0
+
+# New additions
+tenacity 

@@ -4,7 +4,7 @@ with Federated Learning, Homomorphic Encryption, and Differential Privacy
 """
 
 import logging
-from fastapi import FastAPI, Request, BackgroundTasks
+from fastapi import FastAPI, Request, BackgroundTasks, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse
 from fastapi.security import OAuth2PasswordBearer
@@ -34,7 +34,7 @@ from .federated_integration import get_federated_integration, initialize_federat
 from .db.database import init_db
 from .db.migrate import migrate_database
 from .services.service_init import initialize_services
-from .routes.mapping import MappingUpdateRequest  # Import the request model
+from .routes.mapping import MappingUpdateRequest, get_current_mapping, save_mapping
 
 # Import federated learning components
 from .federated_client import FederatedClient
@@ -75,6 +75,7 @@ federated_client = None
 @app.on_event("startup")
 async def startup():
     """Initialize API components on startup"""
+    global federated_client
     logger.info("Starting API initialization...")
     
     # Initialize database and privacy components first
@@ -181,16 +182,12 @@ async def direct_mapping_update(request: MappingUpdateRequest):
     """
     logger.info("Direct mapping update endpoint called")
     try:
-        # Import the necessary functions and models from mapping.py
-        from .routes.mapping import get_current_mapping, save_mapping
-        
         # Get current mapping
         current_mapping = get_current_mapping()
         
         # Check if update is needed
         if not request.force_update and current_mapping:
-            current_classes = list(current_mapping.values())
-            if current_classes == request.classes:
+            if current_mapping == request.mapping:
                 return {
                     "success": True,
                     "message": "Mapping unchanged - already matches requested classes",
@@ -199,7 +196,7 @@ async def direct_mapping_update(request: MappingUpdateRequest):
                 }
         
         # Create new mapping from provided classes
-        new_mapping = {str(idx): class_id for idx, class_id in enumerate(request.classes)}
+        new_mapping = request.mapping
         
         # Save the new mapping
         if save_mapping(new_mapping):
@@ -278,7 +275,6 @@ async def reload_model():
 @app.get("/api/federated/status")
 async def get_federated_status():
     """Get status of federated learning client"""
-    global federated_client
     if not federated_client:
         return {"active": False, "message": "Federated learning not enabled on this node"}
     
@@ -292,7 +288,6 @@ async def get_federated_status():
 @app.post("/api/federated/trigger-round")
 async def trigger_federated_round(background_tasks: BackgroundTasks):
     """Manually trigger participation in a federated round"""
-    global federated_client
     if not federated_client:
         return {"active": False, "message": "Federated learning not enabled on this node"}
     
@@ -306,8 +301,13 @@ async def trigger_federated_round(background_tasks: BackgroundTasks):
         
         # Start training in background
         async def train_and_submit():
+            if not federated_client:
+                logger.error("Federated client not available for background task.")
+                return
+            
             training_metrics, privacy_metrics = await federated_client.train_on_local_data(round_id)
-            success = await federated_client.submit_model_update(round_id, training_metrics, privacy_metrics)
+            # The model is part of the client state now, so not passed directly
+            success = await federated_client.submit_model_update(round_id)
             if success:
                 federated_client.current_round = round_id
         
@@ -326,31 +326,40 @@ async def trigger_federated_round(background_tasks: BackgroundTasks):
 @app.post("/api/federated/sync-model")
 async def sync_federated_model():
     """Download latest global model from coordinator"""
-    global federated_client
     if not federated_client:
         return {"active": False, "message": "Federated learning not enabled on this node"}
     
     try:
         # Download latest global model
-        model = await federated_client.download_global_model()
+        model = await federated_client.load_or_download_model()
         
+        if not model:
+            return {"success": False, "message": "Failed to download global model"}
+
         # Update model in biometric service
-        from .services.service_init import update_biometric_model
-        success = update_biometric_model(model)
+        from .services.service_init import biometric_service
+        if not biometric_service:
+            raise HTTPException(status_code=500, detail="Biometric service not initialized")
+        
+        success = biometric_service.update_model(model)
         
         return {
             "success": success,
-            "message": "Successfully downloaded and applied latest global model" if success else "Failed to apply global model"
+            "message": "Successfully downloaded and applied latest global model" if success else "Failed to apply new model"
         }
         
     except Exception as e:
         logger.error(f"Error syncing model: {e}")
         return {"success": False, "message": f"Failed to sync model: {str(e)}"}
 
+@app.on_event("shutdown")
+def shutdown_event():
+    logger.info("Shutting down API...")
+
 if __name__ == "__main__":
     # Get configuration from environment
     host = os.getenv("API_HOST", "0.0.0.0")
-    port = int(os.getenv("API_PORT", "8000"))
+    port = int(os.getenv("API_PORT", "8080"))
     reload = os.getenv("API_RELOAD", "true").lower() == "true"
     
     # Run the application

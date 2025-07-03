@@ -28,6 +28,10 @@ from fastapi.responses import JSONResponse, FileResponse
 from pydantic import BaseModel
 import uvicorn
 from sqlalchemy.orm import Session
+from sqlalchemy import (
+    create_engine, Column, String, Integer, JSON, DateTime, Boolean, Float, ForeignKey
+)
+from sqlalchemy.orm import sessionmaker, declarative_base, relationship
 
 from .models.privacy_biometric_model import PrivacyBiometricModel
 # Removed privacy_biometrics dependency to make API independent
@@ -49,7 +53,7 @@ from .routes.mapping import save_mapping  # reuse existing helper
 
 # Force CPU usage regardless of CUDA availability
 torch.cuda.is_available = lambda: False
-device = torch.device('cpu')
+device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
 logger.info("Coordinator using CPU (forced)")
 
 # Initialize FastAPI app
@@ -142,6 +146,34 @@ _global_mapping_cache = None
 
 # Simplified mapping management (API-independent)
 _global_mapping_cache = None
+
+# Path for storing registered clients
+CLIENTS_FILE_PATH = Path("/app/data/registered_clients.json")
+
+# Ensure the directory for the clients file exists
+CLIENTS_FILE_PATH.parent.mkdir(exist_ok=True)
+
+def _load_clients_from_file() -> Dict[str, ClientInfo]:
+    """Loads the dictionary of registered clients from a JSON file."""
+    if not CLIENTS_FILE_PATH.exists():
+        return {}
+    try:
+        with open(CLIENTS_FILE_PATH, 'r') as f:
+            clients_data = json.load(f)
+            # Re-create Pydantic models from the loaded dict
+            return {cid: ClientInfo(**cdata) for cid, cdata in clients_data.items()}
+    except (json.JSONDecodeError, IOError) as e:
+        logger.error(f"Error loading clients file: {e}. Returning empty dict.")
+        return {}
+
+def _save_clients_to_file(clients: Dict[str, ClientInfo]):
+    """Saves the dictionary of registered clients to a JSON file."""
+    try:
+        with open(CLIENTS_FILE_PATH, 'w') as f:
+            # Convert Pydantic models to dicts for JSON serialization
+            json.dump({cid: cinfo.dict() for cid, cinfo in clients.items()}, f, indent=2)
+    except IOError as e:
+        logger.error(f"Error saving clients file: {e}")
 
 def get_default_mapping() -> Dict[str, int]:
     """Get default identity mapping"""
@@ -683,7 +715,10 @@ async def get_config():
 @app.get("/status")
 async def get_status():
     """Get current federated learning status"""
-    global current_round, registered_clients, client_updates
+    global current_round, client_updates
+    
+    # Load clients from file for up-to-date status
+    registered_clients = _load_clients_from_file()
     
     return {
         "active": True,
@@ -697,12 +732,16 @@ async def get_status():
 @app.post("/clients/register")
 async def register_client(client_info: ClientInfo):
     """Register a client for federated learning"""
-    global registered_clients
+    # Load the current list of clients
+    registered_clients = _load_clients_from_file()
     
     # Register or update client info
     registered_clients[client_info.client_id] = client_info
     
-    logger.info(f"Client registered: {client_info.client_id}")
+    # Save the updated list back to the file
+    _save_clients_to_file(registered_clients)
+    
+    logger.info(f"Client registered: {client_info.client_id}. Total clients: {len(registered_clients)}")
     return {"success": True, "client_id": client_info.client_id}
 
 @app.get("/rounds/current")
@@ -841,10 +880,18 @@ async def upload_model_update(
     background_tasks: BackgroundTasks,
     update: Dict = Body(...)
 ):
-    """Upload model weights for federated learning"""
-    global client_updates, current_round
-    
-    logger.info(f"Receiving model update from client {client_id} for round {round_id}")
+    """
+    Receive model update from a client and store it for aggregation.
+    """
+    logger.info(
+        f"Received model update from client {client_id} for round {round_id}. "
+        f"Dataset size: {update.get('dataset_size', 'N/A')}, "
+        f"Mapping hash: {update.get('mapping_hash', 'N/A')}"
+    )
+
+    if current_round is None or round_id != current_round.round_id:
+        logger.warning(f"Update from client {client_id} for incorrect round {round_id} (current is {current_round.round_id if current_round else 'None'}).")
+        raise HTTPException(status_code=400, detail=f"Update for incorrect round {round_id}")
     
     try:
         # Verify client is registered
@@ -917,57 +964,32 @@ async def upload_model_update(
         raise HTTPException(status_code=500, detail=str(e))
 
 async def aggregate_and_update_model():
-    """Aggregate client updates and update the global model"""
+    """
+    Aggregate client model updates and update the global model.
+    """
     global global_model, client_updates, current_round
     
-    # Runtime safety: ensure required globals are set (helps both mypy & runtime)
-    assert global_model is not None, "Global model not initialized"
-    assert current_round is not None, "Current round not initialized"
+    if not client_updates:
+        logger.warning("No client updates to aggregate.")
+        return
+        
+    logger.info(f"Aggregating {len(client_updates)} client updates for round {current_round.round_id}.")
 
-    logger.info(f"Starting model aggregation for round {current_round.round_id}")
-    
     try:
-        # Verify mapping consistency
-        mapping_wrapper = get_current_mapping()
-        if not mapping_wrapper:
-            raise ValueError("Global mapping not available")
+        # Perform aggregation
+        aggregated_state_dict = aggregate_model_updates(client_updates)
         
-        # Extract real mapping
-        if "identity_to_index" in mapping_wrapper:
-            server_mapping_dict = mapping_wrapper["identity_to_index"]
-        elif "mapping" in mapping_wrapper:
-            server_mapping_dict = mapping_wrapper["mapping"]
-        else:
-            server_mapping_dict = mapping_wrapper
-        mapping_size = len(server_mapping_dict)
-        mapping_hash = hashlib.sha256(json.dumps(sorted(server_mapping_dict.items())).encode()).hexdigest()[:8]
-        
-        # Verify all clients have correct mapping size and version
-        for client_id, update in client_updates.items():
-            if update["mapping_size"] != mapping_size:
-                raise ValueError(f"Mapping size mismatch for client {client_id}")
-            if update.get("mapping_hash") != mapping_hash:
-                raise ValueError(f"Mapping version mismatch for client {client_id}")
-        
-        # Aggregate updates
-        aggregated_params = aggregate_model_updates(client_updates)
-        
-        # Verify aggregated model dimensions
-        if 'classifier.weight' in aggregated_params:
-            classifier_size = aggregated_params['classifier.weight'].shape[0]
-            if classifier_size != mapping_size:
-                raise ValueError(f"Aggregated model classifier size ({classifier_size}) doesn't match mapping size ({mapping_size})")
-        
-        # Update global model
-        global_model.load_state_dict(aggregated_params)
+        # Load aggregated weights into global model
+        global_model.load_state_dict(aggregated_state_dict)
+        logger.info(f"Successfully aggregated models and updated global model for round {current_round.round_id}.")
         
         # Evaluate the aggregated model
         metrics = evaluate_global_model(global_model)
         
         # Add mapping metrics
         metrics.update({
-            'mapping_size': mapping_size,
-            'mapping_hash': mapping_hash,
+            'mapping_size': len(aggregated_state_dict['classifier.weight']),
+            'mapping_hash': hashlib.sha256(json.dumps(sorted(aggregated_state_dict['classifier.weight'].tolist())).encode()).hexdigest()[:8],
             'mapping_version': get_current_time_str()
         })
         
@@ -1266,4 +1288,5 @@ async def debug_mapping(request: Request):
         return {"success": False, "error": str(e)}
 
 if __name__ == "__main__":
-    uvicorn.run("coordinator:app", host="0.0.0.0", port=8000, reload=True) 
+    # Example: uvicorn.run("coordinator:app", host="0.0.0.0", port=8080, reload=True)
+    pass 

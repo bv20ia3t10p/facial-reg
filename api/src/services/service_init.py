@@ -79,7 +79,7 @@ def initialize_mapping_service(client_id=None):
             client_id = os.getenv("CLIENT_ID", "client1")
         
         # Get server URL from environment or use default
-        server_url = os.getenv("SERVER_URL", "http://fl-coordinator:8000")
+        server_url = os.getenv("SERVER_URL", "http://fl-coordinator:8080")
         
         logger.info(f"Initializing mapping service for client {client_id} with server {server_url}")
         
@@ -189,12 +189,12 @@ def initialize_emotion_service():
     
     try:
         # Import here to avoid circular imports
-        from ..services.emotion_service import EmotionAnalyzer
+        from ..services.emotion_service import EmotionService
         
         logger.info("Initializing emotion service")
         
         # Create service instance
-        emotion_service = EmotionAnalyzer()
+        emotion_service = EmotionService()
         
         return emotion_service
         

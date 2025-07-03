@@ -48,8 +48,8 @@ async def get_current_user(
     )
     try:
         payload = jwt.decode(token, SECRET_KEY, algorithms=[ALGORITHM])
-        user_id: str = payload.get("sub")
-        if user_id is None:
+        user_id = payload.get("sub")
+        if user_id is None or not isinstance(user_id, str):
             raise credentials_exception
         token_data = TokenData(user_id=user_id)
     except JWTError:
@@ -191,7 +191,7 @@ def authenticate_user(db: Session, email: str, password: str) -> Union[User, boo
         user = db.query(User).filter(User.email == email).first()
         
         # If no user found or password doesn't match
-        if not user or not verify_password(password, user.password_hash):
+        if not user or not verify_password(password, user.password):
             return False
             
         # Return the user if authentication was successful

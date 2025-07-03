@@ -46,8 +46,8 @@ COPY models/best_pretrained_model.pth /app/models/best_pretrained_model.pth
 # Create placeholder database if it doesn't exist (but not model files)
 RUN touch /app/database/federated.db
 
-# Expose port for the coordinator
-EXPOSE 8000
+# Expose coordinator port
+EXPOSE 8080
 
-# Run setup script and then start the coordinator
-CMD ["sh", "-c", "python api/scripts/setup_models_and_mapping.py && uvicorn api.src.coordinator:app --host 0.0.0.0 --port 8000 --reload"] 
+# Start coordinator
+CMD ["sh", "-c", "python api/scripts/setup_models_and_mapping.py && uvicorn api.src.coordinator:app --host 0.0.0.0 --port 8080 --reload"] 

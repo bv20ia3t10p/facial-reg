@@ -12,6 +12,10 @@ from contextlib import asynccontextmanager
 from typing import Optional, Dict, Any
 from datetime import datetime, timedelta
 from pathlib import Path
+from logging.handlers import RotatingFileHandler
+
+# Add src to path to resolve imports
+sys.path.insert(0, str(Path(__file__).parent))
 
 # Third-party imports
 import uvicorn
@@ -23,15 +27,15 @@ import torch
 import sqlite3
 import psutil
 
-# Import federated integration
-from .federated_integration import get_federated_integration, initialize_federated_integration
+# Import from src
+from src.federated_integration import get_federated_integration, initialize_federated_integration
 
 # Configure logging
 logging.basicConfig(
     level=logging.INFO,
     format='%(asctime)s - %(name)s - %(levelname)s - %(message)s',
     handlers=[
-        logging.FileHandler('D:/logs/api.log', maxBytes=10*1024*1024, backupCount=3),
+        RotatingFileHandler('D:/logs/api.log', maxBytes=10*1024*1024, backupCount=3),
         logging.StreamHandler(sys.stdout)
     ]
 )
@@ -140,7 +144,7 @@ class BiometricDatabase:
             cursor = conn.execute("SELECT template_data, template_type, created_at FROM biometric_templates WHERE user_id = ? ORDER BY created_at DESC", (user_id,))
             return cursor.fetchall()
     
-    def log_auth_attempt(self, user_id: str, success: bool, confidence: float, ip_address: str = None, device_info: str = None):
+    def log_auth_attempt(self, user_id: str, success: bool, confidence: float, ip_address: Optional[str] = None, device_info: Optional[str] = None):
         """Log authentication attempt"""
         with self.get_connection() as conn:
             conn.execute("INSERT INTO auth_attempts (user_id, success, confidence_score, ip_address, device_info) VALUES (?, ?, ?, ?, ?)",
@@ -151,6 +155,41 @@ class BiometricDatabase:
 
 db = BiometricDatabase()
 
+class BiometricModel:
+    def __init__(self, model_path: str):
+        self.model_path = model_path
+        self.device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+        self.model = self._load_model()
+
+    def _load_model(self):
+        """Load model with caching"""
+        if "main_model" in MODEL_CACHE:
+            MODEL_CACHE["main_model"]["last_used"] = datetime.now()
+            return MODEL_CACHE["main_model"]["model"]
+        
+        try:
+            if os.path.exists(self.model_path):
+                logger.info(f"Loading model from {self.model_path}")
+                model = torch.load(self.model_path, map_location=self.device, weights_only=True)
+                
+                if hasattr(model, 'eval'):
+                    model.eval()
+                
+                MODEL_CACHE["main_model"] = {
+                    "model": model,
+                    "last_used": datetime.now(),
+                    "size_mb": os.path.getsize(self.model_path) / (1024*1024)
+                }
+                
+                logger.info(f"Model loaded successfully ({MODEL_CACHE['main_model']['size_mb']:.1f}MB)")
+                return model
+            else:
+                logger.error(f"Model file not found: {self.model_path}")
+                return None
+        except Exception as e:
+            logger.error(f"Failed to load model: {str(e)}")
+            return None
+
 class BiometricProcessor:
     """Lightweight biometric processor"""
     
@@ -159,7 +198,7 @@ class BiometricProcessor:
         self.device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
         logger.info(f"Using device: {self.device}")
     
-    def load_model(self):
+    def _load_model(self):
         """Load model with caching"""
         if "main_model" in MODEL_CACHE:
             MODEL_CACHE["main_model"]["last_used"] = datetime.now()
@@ -302,11 +341,11 @@ async def get_metrics():
 @app.post("/enroll")
 async def enroll_user(user_id: str, image: UploadFile = File(...), background_tasks: BackgroundTasks = BackgroundTasks()):
     """Enroll a new user"""
-    if not image.content_type.startswith("image/"):
+    if not image.content_type or not image.content_type.startswith("image/"):
         raise HTTPException(status_code=400, detail="Invalid image format")
     
-    if image.size > 5 * 1024 * 1024:
-        raise HTTPException(status_code=413, detail="Image too large")
+    if image.size is None or image.size > 5 * 1024 * 1024:
+        raise HTTPException(status_code=413, detail="Image too large or size unknown")
     
     try:
         image_data = await image.read()
@@ -447,7 +486,7 @@ async def get_federated_status():
     """Get federated learning status"""
     try:
         integration = get_federated_integration()
-        status = integration.get_federated_status()
+        status = integration.get_status()
         return status
     except Exception as e:
         logger.error(f"Error getting federated status: {str(e)}")
@@ -458,7 +497,7 @@ async def trigger_federated_round():
     """Manually trigger a federated learning round"""
     try:
         integration = get_federated_integration()
-        success = integration.trigger_federated_round()
+        success = integration.trigger_round()
         
         if success:
             return {"success": True, "message": "Federated round triggered successfully"}

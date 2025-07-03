@@ -8,14 +8,12 @@ import sys
 import logging
 import torch
 from pathlib import Path
+sys.path.append(str(Path(__file__).resolve().parents[2]))
 
-# Add the parent directory to the Python path
-parent_dir = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
-sys.path.append(parent_dir)
-sys.path.append(os.path.dirname(parent_dir))  # Add root directory too
-
-from api.src.services.biometric_model_loader import BiometricModelLoader
-from privacy_biometric_model import PrivacyBiometricModel
+from src.models.privacy_biometric_model import PrivacyBiometricModel
+from src.services.biometric_model_loader import BiometricModelLoader
+from src.services.mapping_service import MappingService
+from src.db.database import get_db, Session
 
 # Configure logging
 logging.basicConfig(
@@ -30,7 +28,7 @@ def test_model_loading():
     try:
         logger.info("Starting model loading test...")
         
-        # Determine device
+        # Forcing CPU for compatibility
         device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
         logger.info(f"Using device: {device}")
         
