@@ -9,7 +9,6 @@ import json
 import shutil
 import logging
 from pathlib import Path
-from typing import Dict, List
 
 # Configure logging
 logging.basicConfig(level=logging.INFO)
@@ -149,7 +148,7 @@ def backup_models():
             # Verify model file integrity
             try:
                 import torch
-                state_dict = torch.load(source_path, map_location='cpu')
+                torch.load(source_path, map_location='cpu')
                 logger.info(f"Verified model integrity: {source_path}")
             except Exception as e:
                 logger.error(f"Model file corrupted: {source_path} - {e}")

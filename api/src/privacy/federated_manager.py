@@ -3,10 +3,8 @@ Federated Learning Manager for Privacy-Preserving Model Training
 """
 
 import torch
-import torch.nn as nn
 from typing import Dict, List, Any, Optional
 import logging
-import asyncio
 from datetime import datetime
 import numpy as np
 from collections import defaultdict

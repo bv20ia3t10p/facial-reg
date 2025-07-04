@@ -6,32 +6,20 @@ Manages federated learning rounds and model aggregation
 import os
 import logging
 import json
-import time
-import asyncio
-from datetime import datetime, timedelta
-from typing import Dict, List, Optional, Any, Tuple
+from datetime import datetime
+from typing import Dict, List, Optional, Any
 from pathlib import Path
 import hashlib
-import uuid
-import sys
 import base64
 import io
 import shutil
 
 import torch
 import torch.nn as nn
-import torch.nn.functional as F
-import numpy as np
-from fastapi import FastAPI, BackgroundTasks, HTTPException, UploadFile, File, Body, Request
+from fastapi import FastAPI, BackgroundTasks, HTTPException, Body, Request
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse, FileResponse
 from pydantic import BaseModel
-import uvicorn
-from sqlalchemy.orm import Session
-from sqlalchemy import (
-    create_engine, Column, String, Integer, JSON, DateTime, Boolean, Float, ForeignKey
-)
-from sqlalchemy.orm import sessionmaker, declarative_base, relationship
 
 from .models.privacy_biometric_model import PrivacyBiometricModel
 # Removed privacy_biometrics dependency to make API independent
@@ -44,12 +32,9 @@ logging.getLogger('opacus.validators.module_validator').setLevel(logging.WARNING
 logging.getLogger('opacus.validators.batch_norm').setLevel(logging.WARNING)
 
 # Import privacy components
-from .privacy.privacy_engine import PrivacyEngine
-from .utils.security import generate_uuid
+from .utils.datetime_utils import get_current_time, get_current_time_str
 from .db.database import get_db
-from .utils.datetime_utils import get_current_time, get_current_time_str, get_current_time_formatted
-from .utils.generate_mapping import generate_class_mapping as generate_global_mapping_from_directories
-from .routes.mapping import save_mapping  # reuse existing helper
+from .utils.datetime_utils import get_current_time_formatted
 
 # Force CPU usage regardless of CUDA availability
 torch.cuda.is_available = lambda: False
@@ -144,8 +129,21 @@ GLOBAL_MAPPING_PATH = Path("/app/models/mappings/global_mapping.json")
 # Memory cache for faster access
 _global_mapping_cache = None
 
-# Simplified mapping management (API-independent)
-_global_mapping_cache = None
+def save_mapping(mapping: Dict[str, str]) -> bool:
+    """Save the global mapping to file and update cache"""
+    global _global_mapping_cache
+    
+    try:
+        GLOBAL_MAPPING_PATH.parent.mkdir(exist_ok=True, parents=True)
+        with open(GLOBAL_MAPPING_PATH, 'w') as f:
+            json.dump(mapping, f, indent=2)
+        
+        # Update cache
+        _global_mapping_cache = mapping
+        return True
+    except Exception as e:
+        logger.error(f"Error saving global mapping: {e}")
+        return False
 
 # Path for storing registered clients
 CLIENTS_FILE_PATH = Path("/app/data/registered_clients.json")
@@ -175,7 +173,7 @@ def _save_clients_to_file(clients: Dict[str, ClientInfo]):
     except IOError as e:
         logger.error(f"Error saving clients file: {e}")
 
-def get_default_mapping() -> Dict[str, int]:
+def get_default_mapping() -> Dict[str, Any]:
     """Get default identity mapping"""
     global _global_mapping_cache
     if _global_mapping_cache is None:
@@ -220,6 +218,9 @@ def get_current_mapping() -> Dict[str, Any]:
                 "identity_to_index": identity_mapping,
                 "index_to_identity": reverse_mapping,
                 
+                # Add partition_stats
+                "partition_stats": mapping_data.get("partition_stats", {}),
+                
                 # Metadata
                 "loaded_identities": len(identity_mapping),
                 "identity_range": {"min": min(identity_mapping.values()), "max": max(identity_mapping.values())},
@@ -248,9 +249,12 @@ def get_current_mapping() -> Dict[str, Any]:
                 "identity_to_index": identity_mapping,
                 "index_to_identity": reverse_mapping,
                 
+                # Add partition_stats (will be empty in this case)
+                "partition_stats": {},
+                
                 # Metadata
                 "loaded_identities": len(identity_mapping),
-                "identity_range": {"min": 0, "max": len(identity_mapping) - 1},
+                "identity_range": {"min": min(identity_mapping.values()), "max": max(identity_mapping.values())},
                 
                 # Legacy compatibility
                 "mapping": identity_mapping,
@@ -498,9 +502,9 @@ def load_or_create_global_model():
             if isinstance(state_dict, dict) and 'state_dict' in state_dict:
                 stored_num_identities = state_dict.get('num_identities', num_identities)
                 embedding_dim = state_dict.get('feature_dim', 512)
-                backbone_output_dim = state_dict.get('backbone_output_dim', 2048)
-                mapping_version = state_dict.get('mapping_version')
-                mapping_hash = state_dict.get('mapping_hash')
+                _ = state_dict.get('backbone_output_dim', 2048)
+                _ = state_dict.get('mapping_version')
+                _ = state_dict.get('mapping_hash')
                 state_dict = state_dict['state_dict']
                 
                 # Verify mapping consistency
@@ -510,7 +514,6 @@ def load_or_create_global_model():
                     raise ValueError("Model size mismatch with current mapping")
             else:
                 embedding_dim = 512
-                backbone_output_dim = 2048
             
             # Create model with correct parameters
             model = PrivacyBiometricModel(
@@ -546,7 +549,6 @@ def load_or_create_global_model():
             privacy_enabled=federated_config['enable_dp']
         ).to(device)
         # Save initial model
-        current_mapping = get_current_mapping()
         save_model_version(model, 0, {})
     
     model.eval()  # Set to evaluation mode
@@ -994,7 +996,7 @@ def aggregate_and_update_model():
         })
         
         # Save the new model version with mapping metadata
-        save_path = save_model_version(global_model, current_round.round_id, metrics)
+        save_model_version(global_model, current_round.round_id, metrics)
         
         # Update round status
         current_round.aggregation_completed = True
@@ -1022,7 +1024,7 @@ def get_global_mapping(request: Request):
     Get the global class-to-user mapping using centralized identity_mapping.json
     
     Returns:
-        Dict with class indices as keys and user IDs as values
+        The full mapping data dictionary including partition_stats
     """
     client_id = request.headers.get("X-Client-ID")
     logger.info(f"Mapping request from client: {client_id}")
@@ -1030,23 +1032,14 @@ def get_global_mapping(request: Request):
     mapping_data = get_current_mapping()
     
     if "error" in mapping_data:
-        return {
+        return JSONResponse(status_code=500, content={
             "success": False,
-            "error": mapping_data["error"],
-            "mapping": {},
-            "count": 0
-        }
+            "error": mapping_data["error"]
+        })
     
-    # Convert to legacy format for API compatibility
-    legacy_mapping = mapping_data.get("index_to_identity", {})
-    
-    return {
-        "success": True,
-        "mapping": legacy_mapping,
-        "count": len(legacy_mapping),
-        "version": mapping_data.get("version", "unknown"),
-        "source": "centralized_identity_mapping"
-    }
+    # Add success flag and return the whole object
+    mapping_data["success"] = True
+    return mapping_data
 
 @app.post("/api/mapping/update")
 def update_global_mapping(request: MappingUpdateRequest):
@@ -1095,52 +1088,6 @@ def update_global_mapping(request: MappingUpdateRequest):
     except Exception as e:
         logger.error(f"Error updating global mapping: {e}")
         raise HTTPException(status_code=500, detail=f"Failed to update global mapping: {str(e)}")
-
-@app.get("/api/mapping/generate")
-def generate_mapping():
-    """
-    Generate a new global mapping from partitioned data directories
-    This follows the same approach as in improved_privacy_training.py
-    """
-    logger.info("GET /api/mapping/generate endpoint called")
-    try:
-        # Check if partitioned data directory exists
-        partitioned_path = Path("/app/data/partitioned")
-        directory_exists = partitioned_path.exists()
-        
-        # Generate new mapping from directories
-        new_mapping = generate_global_mapping_from_directories()
-        
-        if not new_mapping:
-            return {
-                "success": False,
-                "message": "Failed to generate mapping - no classes found",
-                "count": 0,
-                "directory_exists": directory_exists
-            }
-        
-        # Check if this is a default mapping
-        is_default = len(new_mapping) == 100 and all(new_mapping[str(i)] == str(i) for i in range(100))
-        
-        # Save the new mapping
-        if save_mapping(new_mapping):
-            logger.info(f"Generated and saved new global mapping with {len(new_mapping)} classes")
-            
-            return {
-                "success": True,
-                "message": "Global mapping generated successfully" + (" (using default mapping)" if is_default else ""),
-                "mapping": new_mapping,
-                "count": len(new_mapping),
-                "directory_exists": directory_exists,
-                "is_default_mapping": is_default,
-                "data_path": str(partitioned_path)
-            }
-        else:
-            raise HTTPException(status_code=500, detail="Failed to save generated mapping")
-            
-    except Exception as e:
-        logger.error(f"Error generating mapping: {e}")
-        raise HTTPException(status_code=500, detail=f"Failed to generate mapping: {str(e)}")
 
 @app.get("/api/mapping/refresh")
 def refresh_global_mapping(request: Request):

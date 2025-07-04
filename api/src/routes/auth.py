@@ -2,25 +2,17 @@
 Authentication routes for facial recognition
 """
 
-import base64
-import io
 import json
 import logging
-import time
 import traceback
 from datetime import datetime, timedelta
-from pathlib import Path
 from functools import wraps
 import asyncio
 from typing import Optional
 
-import numpy as np
 from fastapi import APIRouter, Depends, File, Form, HTTPException, Request, UploadFile, status, BackgroundTasks
-from fastapi.responses import JSONResponse
-from PIL import Image
-from pydantic import BaseModel
 from sqlalchemy.orm import Session
-from sqlalchemy.exc import SQLAlchemyError, OperationalError
+from sqlalchemy.exc import SQLAlchemyError
 
 from ..db.database import get_db, User, AuthenticationLog
 from ..services.service_init import initialize_biometric_service
@@ -193,7 +185,7 @@ async def authenticate_user(
         image_data = await image.read()
 
         # Get predicted user ID and confidence
-        prediction = biometric_svc.predict_identity(image_data, db=db, email=email)
+        prediction = biometric_svc.predict_identity(image_data)
         predicted_user_id = prediction.get('user_id')
         confidence = prediction.get('confidence', 0.0)
         threshold = 0.7
@@ -213,9 +205,9 @@ async def authenticate_user(
                 created_at=datetime.utcnow(),
                 last_authenticated=None
             )
+            db.add(user)
         else:
             user.last_authenticated = datetime.utcnow()  # type: ignore
-            db.add(user)
         
         auth_time = user.last_authenticated or datetime.utcnow()
         auth_log_id = generate_auth_log_id()

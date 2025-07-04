@@ -3,7 +3,6 @@ Database initialization and models for the biometric authentication system
 """
 
 from sqlalchemy import create_engine, Column, Integer, String, Float, DateTime, Boolean, Text, ForeignKey, JSON, LargeBinary
-from sqlalchemy.orm import foreign
 from sqlalchemy.ext.declarative import declarative_base
 from sqlalchemy.orm import sessionmaker, relationship, Session
 from sqlalchemy import text
@@ -12,10 +11,8 @@ from datetime import datetime
 import logging
 from typing import Optional, Any, Dict, Generator
 import os
-from fastapi import HTTPException, status, Depends
-from pathlib import Path
 import json
-from ..utils.datetime_utils import get_current_time, UTC_PLUS_7
+from ..utils.datetime_utils import get_current_time
 
 from ..utils.common import generate_uuid, generate_auth_log_id
 
@@ -203,7 +200,7 @@ def get_db() -> Generator[Session, None, None]:
             if db:
                 try:
                     db.close()
-                except:
+                except Exception:
                     pass
             db = SessionLocal()
             # Test again

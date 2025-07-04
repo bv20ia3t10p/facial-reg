@@ -4,16 +4,11 @@ Service initialization and management
 
 import os
 import logging
-import importlib
 import torch
 from pathlib import Path
-import sys
 import traceback
 from datetime import datetime
-from typing import Optional
 
-from .mapping_service import MappingService
-from .biometric_service import BiometricService
 from .emotion_service import EmotionService
 
 logger = logging.getLogger(__name__)
@@ -21,7 +16,6 @@ logger = logging.getLogger(__name__)
 # Global service instances
 biometric_service = None
 emotion_service = None
-mapping_service = None
 # Flag to track if services have been initialized
 _services_initialized = False
 
@@ -52,61 +46,7 @@ def initialize_services():
         _services_initialized = False
         return False
 
-def initialize_mapping_service(client_id=None):
-    """Initialize the mapping service"""
-    global mapping_service
-    
-    # Check if service is already initialized
-    if mapping_service is not None:
-        logger.info("Mapping service already initialized, forcing refresh")
-        try:
-            # Force refresh from centralized mapping
-            mapping_service.initialize_mapping()
-            mapping = mapping_service.get_mapping()
-            if not mapping or len(mapping) == 0:
-                logger.warning("Mapping is empty after refresh")
-            return mapping_service
-        except Exception as e:
-            logger.error(f"Failed to refresh mapping: {e}")
-        return mapping_service
-    
-    try:
-        # Import here to avoid circular imports
-        from ..services.mapping_service import MappingService
-        
-        # Get client ID from environment or use default
-        if client_id is None:
-            client_id = os.getenv("CLIENT_ID", "client1")
-        
-        # Get server URL from environment or use default
-        server_url = os.getenv("SERVER_URL", "http://fl-coordinator:8080")
-        
-        logger.info(f"Initializing mapping service for client {client_id} with server {server_url}")
-        
-        # Create service instance
-        service = MappingService()
-        mapping_service = service  # Store in global variable
-        
-        # Initialize the mapping using centralized manager
-        try:
-            service.initialize_mapping()
-            mapping = service.get_mapping()
-            if mapping and len(mapping) > 0:
-                logger.info(f"Successfully initialized mapping with {len(mapping)} entries")
-                logger.info(f"Sample mapping (first 5): {dict(list(mapping.items())[:5])}")
-            else:
-                logger.warning("No mapping available, client will operate with limited functionality")
-        except Exception as e:
-            logger.error(f"Error initializing mapping: {e}")
-            
-        return service
-        
-    except Exception as e:
-        logger.error(f"Failed to initialize mapping service: {e}")
-        traceback.print_exc()
-        return None
-
-def initialize_biometric_service(client_id=None, existing_mapping_service=None):
+def initialize_biometric_service(client_id=None):
     """Initialize the biometric recognition service"""
     global biometric_service
     
@@ -155,7 +95,7 @@ def initialize_biometric_service(client_id=None, existing_mapping_service=None):
                     logger.error("No model files found in /app/models directory or root")
                     return None
         
-        # Create service instance with existing mapping service
+        # Create service instance
         biometric_service = BiometricService(client_id=client_id)
         
         # Verify model loaded correctly

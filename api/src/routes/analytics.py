@@ -5,7 +5,7 @@ Analytics routes for the biometric authentication system
 from fastapi import APIRouter, Depends, HTTPException, status
 from sqlalchemy.orm import Session
 from sqlalchemy import desc
-from typing import Dict, List, Optional, Union, Any
+from typing import Dict, List, Optional, Any
 from datetime import datetime, timedelta
 import logging
 import json
@@ -62,7 +62,7 @@ def safe_parse_emotion_data(emotion_data: Any) -> Dict:
                         return json.loads(fixed_json)
                     except json.JSONDecodeError:
                         if "Expecting property name enclosed in double quotes" not in str(e):
-                            logger.warning(f"Failed to parse emotion data after quote replacement")
+                            logger.warning("Failed to parse emotion data after quote replacement")
 
     # Return empty dict if all parsing attempts fail
     return {}
@@ -452,7 +452,6 @@ async def get_auth_analytics(
         
         # Calculate metrics
         total_auths = len(logs)
-        successful_auths = sum(1 for log in logs if log.success is True)
         
         # Calculate average confidence
         avg_confidence = 0

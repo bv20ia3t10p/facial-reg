@@ -3,29 +3,14 @@ Federated Learning Integration for Biometric API
 Connects the authentication API with the federated learning coordinator
 """
 
-import os
-import sys
 import logging
-import asyncio
 import json
-from datetime import datetime, timedelta
-from typing import Dict, List, Optional, Any
-import hashlib
+from typing import Dict, Optional, Any
 from pathlib import Path
 
-import requests
-import torch
-import numpy as np
-from sqlalchemy import create_engine, Column, Integer, String, Float, DateTime, Boolean, Text, MetaData
+from sqlalchemy import Column, Integer, String, Float, DateTime, Boolean, Text, MetaData
 from sqlalchemy.ext.declarative import declarative_base
-from sqlalchemy.orm import sessionmaker, Session
-import schedule
-import time
-import threading
 
-from .privacy.privacy_engine import PrivacyEngine
-from .utils.security import generate_uuid
-from .db.database import get_db
 from .utils.datetime_utils import get_current_time, get_current_time_str
 
 # Configure logging

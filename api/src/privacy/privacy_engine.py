@@ -7,7 +7,7 @@ from opacus import PrivacyEngine as OpacusPrivacyEngine
 from opacus.validators import ModuleValidator
 import tenseal as ts
 import logging
-from typing import Dict, Any, Optional, Union
+from typing import Dict, Any, Union
 import numpy as np
 import os
 from pathlib import Path

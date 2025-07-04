@@ -26,7 +26,7 @@ services:
       - DP_MAX_GRAD_NORM=5.0
       - IS_SERVER=true
       - NUM_IDENTITIES=100
-    command: uvicorn api.src.coordinator:app --host 0.0.0.0 --reload
+    command: uvicorn api.src.coordinator:app --host 0.0.0.0 --port 8080 --reload
     restart: unless-stopped
     networks:
       - biometric-net
@@ -66,7 +66,7 @@ services:
       - SERVER_URL=http://fl-coordinator:8080
       - IS_SERVER=false
       - NUM_IDENTITIES=300
-    command: uvicorn api.src.app:app --host 0.0.0.0 --reload
+    command: uvicorn api.src.main:app --host 0.0.0.0 --port 8080 --reload
     deploy:
       resources:
         reservations:
@@ -116,7 +116,7 @@ services:
       - SERVER_URL=http://fl-coordinator:8080
       - IS_SERVER=false
       - NUM_IDENTITIES=300
-    command: uvicorn api.src.app:app --host 0.0.0.0 --reload
+    command: uvicorn api.src.main:app --host 0.0.0.0 --port 8080 --reload
     deploy:
       resources:
         reservations:

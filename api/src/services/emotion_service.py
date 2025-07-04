@@ -12,19 +12,18 @@ logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 
 class EmotionService:
+    """Service for detecting emotions from facial images"""
+
     def __init__(self):
         """Initialize the emotion service"""
-        self.api_url = os.getenv('EMOTION_API_URL')
-        if not self.api_url:
-            logger.error("EMOTION_API_URL environment variable not set. Using default.")
-            self.api_url = 'http://emotion-api:8080'
+        # Use API URL from environment variable or default to local service
+        self.api_url = os.getenv("EMOTION_API_URL", 'http://emotion-api:8080')
         
-        http2_disabled = httpx.Client(http2=False)
         self.client = httpx.AsyncClient(timeout=10.0, base_url=self.api_url, transport=httpx.AsyncHTTPTransport(http2=False))
         logger.info(f"Emotion service initialized to use API at: {self.api_url}")
 
     async def detect_emotion(self, image_data: bytes) -> Dict[str, float]:
-        """Detect emotions in an image by calling the external emotion API."""
+        """Detect emotion from a given image"""
         try:
             files = {'file': ('image.jpg', image_data, 'image/jpeg')}
             

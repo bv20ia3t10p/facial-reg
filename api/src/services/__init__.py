@@ -3,8 +3,7 @@ Services package initialization
 """
 
 # Import services
-from .biometric_service import BiometricService
-from .mapping_service import MappingService
+from .biometric_service import BiometricService as BiometricService
 
 # Import biometric service components if needed
 # from .feature_extraction import FeatureExtractor

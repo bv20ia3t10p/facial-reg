@@ -5,13 +5,11 @@ Utility functions for biometric service
 import logging
 from pathlib import Path
 from datetime import datetime
-from typing import Dict, Any, List, Callable
+from typing import Dict, Callable
 import os
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
-
-from .mapping_service import MappingService
 
 # Configure logging
 logger = logging.getLogger(__name__)
@@ -20,7 +18,8 @@ class BiometricUtilsMixin:
     """Utility methods for biometric service"""
     # Declare attributes from BiometricService to inform the linter
     client_id: str
-    mapping_service: MappingService
+    identity_to_index: Dict[str, int]
+    index_to_identity: Dict[int, str]
     device: torch.device
     model: nn.Module
     initialized: bool
@@ -32,16 +31,13 @@ class BiometricUtilsMixin:
         logger.info(f"Client ID: {self.client_id}")
         
         # Get current mapping
-        self.mapping_service.initialize_mapping()  # Refresh mapping
-        mapping = self.mapping_service.get_mapping()
+        mapping = self.index_to_identity
         logger.info(f"Total users in mapping: {len(mapping)}")
         
         # Print sample of mapping entries
         sample_count = min(10, len(mapping))
         logger.info(f"Sample mapping (first {sample_count} entries):")
-        for i, (class_idx, user_id) in enumerate(mapping.items()):
-            if i >= sample_count:
-                break
+        for class_idx, user_id in list(mapping.items())[:sample_count]:
             logger.info(f"  Class {class_idx} -> User {user_id}")
             
         # Check for folder structure
@@ -63,13 +59,6 @@ class BiometricUtilsMixin:
         else:
             logger.warning(f"Client directory not found: {client_dir}")
             
-        # Check server connectivity
-        try:
-            is_server_available = self.mapping_service.initialize_mapping()
-            logger.info(f"Mapping server connectivity: {'OK' if is_server_available else 'UNAVAILABLE'}")
-        except Exception as e:
-            logger.error(f"Error checking server connectivity: {e}")
-        
         logger.info("====================================================")
     
     def get_model_info(self):
@@ -80,13 +69,12 @@ class BiometricUtilsMixin:
                 "device": str(self.device),
                 "model_type": type(self.model).__name__,
                 "initialized": self.initialized,
-                "mapping_service_available": hasattr(self, 'mapping_service'),
+                "mapping_available": hasattr(self, 'index_to_identity') and bool(self.index_to_identity),
             }
             
             # Add mapping information if available
-            if hasattr(self, 'mapping_service'):
-                self.mapping_service.initialize_mapping()  # Refresh mapping
-                mapping = self.mapping_service.get_mapping()
+            if hasattr(self, 'index_to_identity'):
+                mapping = self.index_to_identity
                 info["mapping_count"] = len(mapping)
                 info["mapping_sample"] = {k: mapping[k] for k in list(mapping.keys())[:5]} if mapping else {}
             
@@ -138,15 +126,13 @@ class BiometricUtilsMixin:
                 top_confidences, top_indices = torch.topk(probabilities, top_k)
                 
                 # Get current mapping
-                self.mapping_service.initialize_mapping()  # Refresh mapping
-                mapping = self.mapping_service.get_mapping()
+                mapping = self.index_to_identity
                 
                 # Format results
                 top_predictions = []
                 for i, (conf, idx) in enumerate(zip(top_confidences, top_indices)):
                     class_idx = idx.item()
-                    str_idx = str(class_idx)
-                    user_id = mapping.get(str_idx, f"unknown_{class_idx}")
+                    user_id = mapping.get(int(class_idx), f"unknown_{class_idx}")
                     top_predictions.append({
                         "rank": i+1,
                         "class_index": class_idx,

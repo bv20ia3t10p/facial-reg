@@ -8,8 +8,7 @@ import logging
 import json
 import time
 import asyncio
-from datetime import datetime
-from typing import Dict, List, Optional, Any, Tuple
+from typing import Dict, Optional, Any, Tuple
 from pathlib import Path
 import random
 import hashlib
@@ -21,14 +20,10 @@ import torch
 import torch.nn as nn
 import torch.optim as optim
 from torch.utils.data import DataLoader, Dataset
-import numpy as np
-import requests
-from fastapi import BackgroundTasks
 import httpx
 from PIL import Image
 from torchvision import transforms
 from tenacity import retry, stop_after_attempt, wait_fixed, retry_if_exception_type
-from torchvision.datasets import ImageFolder
 
 # Disable NNPACK for better compatibility in environments without hardware support.
 if hasattr(torch.backends, 'nnpack'):
@@ -36,7 +31,7 @@ if hasattr(torch.backends, 'nnpack'):
 
 from .models.privacy_biometric_model import PrivacyBiometricModel
 from .privacy.privacy_engine import PrivacyEngine
-from .services.mapping_service import MappingService
+from .utils.mapping_utils import create_client_specific_mapping
 
 # Configure logging
 logging.basicConfig(level=logging.INFO)
@@ -105,7 +100,8 @@ class FederatedClient:
         self.privacy_engine: Optional[PrivacyEngine] = None
         self.model: Optional[PrivacyBiometricModel] = None
         self.dataset_size = 0
-        self.mapping_service: Optional[MappingService] = None
+        self.identity_to_index: Dict[str, int] = {}
+        self.index_to_identity: Dict[int, str] = {}
         self.model_version = -1
         self.training_in_progress = False
         self.stop_event = threading.Event()
@@ -115,38 +111,23 @@ class FederatedClient:
     async def initialize(self):
         """Initialize federated client"""
         try:
-            # Initialize mapping service first
-            from .services.mapping_service import MappingService
-            self.mapping_service = MappingService()
-            
-            # Validate mapping availability
-            if not await self.validate_mapping():
-                logger.error("Failed to validate mapping with coordinator")
+            if not await self._fetch_and_prepare_mapping():
+                logger.error("Failed to fetch and prepare mapping.")
                 return False
-            
-            # Load configuration from coordinator
+
             config_response = await self.client.get(f"{self.server_url}/config")
-            if config_response.status_code == 200:
-                self.federated_config = config_response.json()
-            else:
-                self.federated_config = {
-                    'max_epsilon': 100.0,
-                    'delta': 1e-5,
-                    'noise_multiplier': 0.2,
-                    'max_grad_norm': 5.0
-                }
+            config_response.raise_for_status()
+            self.federated_config = config_response.json()
             
-            # Initialize privacy engine
             self.privacy_engine = PrivacyEngine()
             await self.privacy_engine.initialize()
             
-            # Initialize model
-            self.model = await self.load_or_download_model()
+            self.model = await self.load_or_create_model()
             if not self.model:
                 logger.error("Failed to initialize model")
                 return False
             
-            # Setup DataLoader
+            # Setup DataLoader using our custom dataset and client-specific map
             data_root = os.getenv("CLIENT_DATA_DIR", f"/app/data/partitioned/{self.client_id}")
             transform = transforms.Compose([
                 transforms.Resize((224, 224)),
@@ -155,136 +136,72 @@ class FederatedClient:
             ])
             
             try:
-                # Use ImageFolder to automatically load data
-                dataset = ImageFolder(root=data_root, transform=transform)
+                dataset = ImageDataset(data_dir=data_root, mapping=self.identity_to_index, transform=transform)
                 if len(dataset) == 0:
                     logger.warning(f"No training data found for client {self.client_id} in {data_root}")
                 
-                # This is a temporary workaround. In a real scenario, you would
-                # need to reconcile dataset.class_to_idx with the global mapping.
-                logger.info(f"ImageFolder found {len(dataset.classes)} classes.")
-
                 config = self.federated_config or {}
                 batch_size = config.get('batch_size', 32)
                 self.data_loader = DataLoader(dataset, batch_size=batch_size, shuffle=True, num_workers=2, pin_memory=True)
-                logger.info(f"DataLoader initialized with {len(dataset)} samples.")
+                self.dataset_size = len(dataset)
+                logger.info(f"DataLoader initialized with {self.dataset_size} samples.")
 
             except FileNotFoundError as e:
                 logger.error(f"Failed to create dataset: {e}")
                 return False
-            except Exception as e:
-                logger.error(f"An unexpected error occurred during DataLoader setup: {e}", exc_info=True)
-                return False
 
-            # Register with coordinator
             if await self.register_with_coordinator():
                 self.registered = True
                 self.active = True
+                asyncio.create_task(self.federated_learning_loop())
+                logger.info(f"Federated client {self.client_id} initialized.")
+                return True
             else:
                 logger.warning(f"Failed to register client {self.client_id} with coordinator")
                 return False
             
-            self.dataset_size = len(self.data_loader.dataset) if self.data_loader else 0  # type: ignore
-            
-            # Start background federated loop
-            asyncio.create_task(self.federated_learning_loop())
-            
-            logger.info(f"Federated client {self.client_id} initialized with {self.dataset_size} samples")
-            return True
-            
         except Exception as e:
-            logger.error(f"Error initializing federated client: {e}")
+            logger.error(f"Error initializing federated client: {e}", exc_info=True)
             return False
 
-    async def validate_mapping(self) -> bool:
-        """Validate mapping with coordinator"""
-        if not self.mapping_service:
-            logger.error("Mapping service is not initialized.")
-            return False
+    async def _fetch_and_prepare_mapping(self) -> bool:
+        """Fetches and prepares the client-specific mapping."""
         try:
-            # Initialize mapping from centralized source
-            self.mapping_service.initialize_mapping()
-            mapping = self.mapping_service.get_mapping()
-            
-            # Verify mapping format
-            if not isinstance(mapping, dict):
-                logger.error(f"Invalid mapping format: {type(mapping)}")
+            response = await self.client.get(f"{self.server_url}/api/mapping", timeout=10)
+            response.raise_for_status()
+            full_mapping_data = response.json()
+
+            mapping_result = create_client_specific_mapping(full_mapping_data, self.client_id)
+            if not mapping_result:
+                logger.error(f"Could not create specific mapping for client {self.client_id}.")
                 return False
             
-            # Verify mapping has entries
-            if not mapping:
-                logger.error("Empty mapping received from coordinator")
-                return False
-            
-            logger.info(f"Successfully validated mapping with {len(mapping)} entries")
+            self.identity_to_index, self.index_to_identity = mapping_result
+            logger.info(f"Successfully prepared mapping with {len(self.identity_to_index)} entries.")
             return True
-            
+        except httpx.RequestError as e:
+            logger.error(f"Could not fetch mapping from coordinator: {e}")
+            return False
         except Exception as e:
-            logger.error(f"Error validating mapping: {e}")
+            logger.error(f"Error processing mapping data: {e}", exc_info=True)
             return False
 
-    async def load_or_download_model(self):
-        """Load or download the model"""
-        if not self.mapping_service:
-            logger.error("Mapping service is not initialized.")
+    async def load_or_create_model(self):
+        """Load a local model or create a new one based on the mapping."""
+        if not self.identity_to_index:
+            logger.error("Cannot load model without a valid mapping.")
             return None
+        
+        num_identities = len(self.identity_to_index)
+        logger.info(f"Configuring model for {num_identities} identities.")
+        
         try:
-            # Get current mapping
-            self.mapping_service.initialize_mapping()
-            mapping = self.mapping_service.get_mapping()
-            if not mapping:
-                logger.error("Cannot load model without valid mapping")
-                return None
-            
-            num_identities = len(mapping)
-            logger.info(f"Using {num_identities} identities from global mapping")
-            
-            model_path = Path(f"/app/models/best_{self.client_id}_pretrained_model.pth")
-            
-            if model_path.exists():
-                # Load existing model
-                state_dict = torch.load(model_path, map_location=self.device)
-                
-                # Handle metadata wrapper
-                if isinstance(state_dict, dict) and 'state_dict' in state_dict:
-                    stored_num_identities = state_dict.get('num_identities', num_identities)
-                    embedding_dim = state_dict.get('feature_dim', 512)
-                    state_dict = state_dict['state_dict']
-                    
-                    # Verify mapping consistency
-                    if stored_num_identities != num_identities:
-                        logger.warning(f"Stored model has different number of identities ({stored_num_identities}) than current mapping ({num_identities})")
-                        # We'll create a new model with correct size
-                        raise ValueError("Model size mismatch with current mapping")
-                else:
-                    embedding_dim = 512
-                
-                # Create model with correct parameters
-                model = PrivacyBiometricModel(
-                    num_identities=num_identities,
-                    embedding_dim=embedding_dim,
-                    privacy_enabled=True
-                ).to(self.device)
-                
-                # Load weights
-                try:
-                    model.load_state_dict(state_dict, strict=False)
-                    logger.info(f"Successfully loaded model with {num_identities} identities")
-                except Exception as e:
-                    logger.error(f"Error loading state dict: {e}")
-                    raise ValueError("Failed to load model weights")
-            else:
-                # Create new model with mapping-based parameters
-                model = PrivacyBiometricModel(
-                    num_identities=num_identities,
-                    privacy_enabled=True
-                ).to(self.device)
-                logger.info(f"Created new model with {num_identities} identities")
-            
+            model = PrivacyBiometricModel(num_identities=num_identities, privacy_enabled=True)
+            model.to(self.device)
+            logger.info(f"Created new model for {num_identities} identities.")
             return model
-            
         except Exception as e:
-            logger.error(f"Error loading/downloading model: {e}")
+            logger.error(f"Error creating model: {e}", exc_info=True)
             return None
 
     async def register_with_coordinator(self):
@@ -327,33 +244,25 @@ class FederatedClient:
         """Main federated learning loop"""
         while self.active:
             try:
-                # Get current round from coordinator
                 response = await self.client.get(f"{self.server_url}/rounds/current")
                 if response.status_code != 200:
-                    await asyncio.sleep(5)
+                    await asyncio.sleep(10) # Longer sleep if coordinator is down
                     continue
                 
                 round_info = response.json()
                 round_number = round_info.get("round_id", 0)
                 
                 if round_number > self.current_round:
-                    logger.info(f"Starting participation in round {round_number}")
-                    
-                    # Perform local training in a separate thread to avoid blocking
-                    start_time = time.time()
+                    logger.info(f"Participating in round {round_number}")
                     await asyncio.to_thread(self.train_local)
-                    training_time = time.time() - start_time
-                    
-                    # Submit model update
-                    if await self.submit_model_update(round_number):
-                        self.current_round = round_number
-                        logger.info(f"Completed federated round {round_number}")
+                    await self.submit_model_update(round_number)
+                    self.current_round = round_number
                 
                 await asyncio.sleep(5)
             
             except Exception as e:
                 logger.error(f"Error in federated learning loop: {e}", exc_info=True)
-                await asyncio.sleep(5)
+                await asyncio.sleep(15)
 
     def train_local(self):
         """Perform local training for a specified number of epochs."""
@@ -443,28 +352,15 @@ class FederatedClient:
         if not self.model:
             logger.error("Model is not initialized, cannot submit update.")
             return False
-        if not self.mapping_service:
-            logger.error("Mapping service is not initialized, cannot submit update.")
-            return False
             
         try:
-            # Get mapping info
-            self.mapping_service.initialize_mapping()
-            mapping = self.mapping_service.get_mapping()
-            if not mapping:
-                logger.error("Cannot submit update without valid mapping")
-                return False
-            
-            mapping_size = len(mapping)
-            mapping_hash = hashlib.sha256(json.dumps(sorted(mapping.items())).encode()).hexdigest()[:8]
+            mapping_size = len(self.identity_to_index)
+            mapping_hash = hashlib.sha256(json.dumps(sorted(self.identity_to_index.items())).encode()).hexdigest()[:8]
 
-            # Get latest state dict
+            # Get latest state dict and serialize it
             state_dict = self.model.state_dict()
-            
-            # Serialize state dict to base64
             serialized_state_dict = self._serialize_state_dict(state_dict)
             
-            # Create payload
             payload = {
                 "client_id": self.client_id,
                 "round_id": round_id,
@@ -475,7 +371,6 @@ class FederatedClient:
                 "mapping_hash": mapping_hash
             }
             
-            # Submit to coordinator
             response = await self.client.post(
                 f"{self.server_url}/models/update/{self.client_id}/{round_id}/upload",
                 json=payload
@@ -486,11 +381,11 @@ class FederatedClient:
                 logger.info(f"Successfully submitted model update for round {round_id}")
                 return True
             else:
-                logger.error(f"Error submitting model update: {response.text}")
+                logger.error(f"Error submitting model update ({response.status_code}): {response.text}")
                 return False
                 
         except Exception as e:
-            logger.error(f"Error submitting model update: {e}")
+            logger.error(f"Exception while submitting model update: {e}", exc_info=True)
             return False
 
     @retry(
@@ -574,24 +469,3 @@ class FederatedClient:
             "dataset_size": self.dataset_size,
             "server_url": self.server_url
         }
-
-    def get_latest_model(self) -> Optional[Dict]:
-        """
-        Fetches the latest global model from the coordinator.
-        """
-        try:
-            logger.info("Fetching latest model from coordinator...")
-            response = requests.get(f"{self.server_url}/models/latest", timeout=10)
-            
-            if response.status_code == 200:
-                model_info = response.json()
-                # Implementation of get_latest_model method
-                pass
-            else:
-                logger.error(f"Failed to fetch latest model: {response.status_code}")
-                return None
-        except requests.RequestException as e:
-            logger.error(f"Error fetching latest model: {e}")
-            return None
-
-    # ... rest of the original methods ... 

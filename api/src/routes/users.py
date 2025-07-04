@@ -3,16 +3,11 @@ User management routes for the API
 """
 
 import io
-import json
 import logging
-import time
 import uuid
-import hashlib
-import numpy as np
 from datetime import datetime
 from pathlib import Path
 from typing import List, Optional
-from zoneinfo import ZoneInfo
 
 from fastapi import APIRouter, BackgroundTasks, Depends, File, Form, HTTPException, UploadFile
 from PIL import Image
@@ -20,11 +15,10 @@ from pydantic import BaseModel
 from sqlalchemy.orm import Session
 from sqlalchemy.sql import text
 
-from ..db.database import User, create_user, get_db
+from ..db.database import User, create_user, get_db, AuthenticationLog
 from ..services.service_init import biometric_service
 from ..utils.security import get_current_user, get_password_hash
-from ..utils.common import generate_uuid
-from ..models.privacy_biometric_model import PrivacyBiometricModel
+import pytz
 
 # Configure logging
 logging.basicConfig(level=logging.INFO)
@@ -49,70 +43,6 @@ router = APIRouter()
 
 # Global variable to track if model is being trained
 model_training_in_progress = False
-
-def add_user_to_identity_mapping(user_id: str) -> bool:
-    """
-    Add a new user to the global identity mapping
-    
-    Args:
-        user_id: The new user's ID to add
-        
-    Returns:
-        True if successfully added, False otherwise
-    """
-    try:
-        # Load current identity mapping
-        mapping_path = Path("/app/data/identity_mapping.json")
-        if not mapping_path.exists():
-            # Try alternative paths
-            alternative_paths = [
-                Path("./data/identity_mapping.json"),
-                Path("../data/identity_mapping.json"),
-                Path("/app/models/identity_mapping.json")
-            ]
-            for alt_path in alternative_paths:
-                if alt_path.exists():
-                    mapping_path = alt_path
-                    break
-            else:
-                logger.error("Could not find identity_mapping.json")
-                return False
-        
-        with open(mapping_path, 'r') as f:
-            mapping_data = json.load(f)
-        
-        current_mapping = mapping_data.get("mapping", {})
-        
-        # Check if user already exists
-        if user_id in current_mapping:
-            logger.info(f"User {user_id} already exists in mapping")
-            return True
-        
-        # Find the next available index
-        existing_indices = set(current_mapping.values())
-        next_index = 0
-        while next_index in existing_indices:
-            next_index += 1
-        
-        # Add the new user
-        current_mapping[user_id] = next_index
-        mapping_data["mapping"] = current_mapping
-        mapping_data["total_identities"] = len(current_mapping)
-        
-        # Update hash
-        mapping_str = json.dumps(current_mapping, sort_keys=True)
-        mapping_data["hash"] = hashlib.sha256(mapping_str.encode()).hexdigest()[:16]
-        
-        # Save updated mapping
-        with open(mapping_path, 'w') as f:
-            json.dump(mapping_data, f, indent=2)
-        
-        logger.info(f"Added user {user_id} to identity mapping with index {next_index}")
-        return True
-        
-    except Exception as e:
-        logger.error(f"Failed to add user to identity mapping: {e}")
-        return False
 
 def create_user_data_directory(user_id: str, images: List[UploadFile]) -> bool:
     """
@@ -191,13 +121,8 @@ def process_user_images_for_database(images: List[UploadFile]) -> Optional[bytes
                 img.save(img_bytes, format='JPEG')
                 img_bytes = img_bytes.getvalue()
                 
-                # Use biometric service to extract features
-                image_tensor = biometric_service.preprocess_image(img_bytes)
-                features = biometric_service.feature_extractor.extract_features(image_tensor)
-                
-                # Convert features to bytes for database storage
-                features_np = features.cpu().numpy().astype(np.float32)
-                face_encoding = features_np.tobytes()
+                # As requested, save the processed image bytes directly
+                face_encoding = img_bytes
                 
                 logger.info(f"Successfully processed image {i} for face encoding")
                 return face_encoding
@@ -213,41 +138,6 @@ def process_user_images_for_database(images: List[UploadFile]) -> Optional[bytes
         logger.error(f"Failed to process user images: {e}")
         return None
 
-def notify_coordinator_new_user(user_id: str) -> bool:
-    """
-    Notify the coordinator about a new user for mapping updates
-    
-    Args:
-        user_id: The new user's ID
-        
-    Returns:
-        True if successfully notified, False otherwise
-    """
-    try:
-        import requests
-        import os
-        
-        coordinator_url = os.getenv("SERVER_URL", "http://fl-coordinator:8080")
-        
-        # Try to notify coordinator about new user
-        response = requests.post(
-            f"{coordinator_url}/api/mapping/add-user",
-            json={"user_id": user_id},
-            timeout=10
-        )
-        
-        if response.status_code == 200:
-            logger.info(f"Successfully notified coordinator about new user {user_id}")
-            return True
-        else:
-            logger.warning(f"Coordinator returned status {response.status_code} for new user {user_id}")
-            return False
-            
-    except Exception as e:
-        logger.warning(f"Could not notify coordinator about new user {user_id}: {e}")
-        return False
-
-# Function to train the model in the background
 def train_model_task(db: Optional[Session] = None):
     global model_training_in_progress
     
@@ -263,7 +153,6 @@ def train_model_task(db: Optional[Session] = None):
         # Import federated training components
         try:
             import subprocess
-            import os
             
             # Run federated training script
             script_path = "/app/train_federated.py"
@@ -309,114 +198,92 @@ def train_model_task(db: Optional[Session] = None):
 async def get_user_info(user_id: str, db: Session = Depends(get_db)):
     """Get user information and authentication history"""
     try:
-        # Get authentication stats from authentication_logs with explicit transaction
-        stats_query = db.execute(text("""
-            SELECT 
-                COUNT(*) as total_attempts,
-                SUM(CASE WHEN success THEN 1 ELSE 0 END) as successful_attempts,
-                AVG(confidence) as avg_confidence,
-                MAX(created_at) as last_authenticated
-            FROM authentication_logs 
-            WHERE user_id = :user_id;
-        """), {"user_id": user_id})
-        stats = stats_query.fetchone()
+        # Import here to avoid circular dependency issues at startup
+        from .analytics import safe_parse_emotion_data
         
-        # Get recent authentications with fresh query
-        recent_query = db.execute(text("""
-            SELECT id, user_id, success, confidence, emotion_data, created_at, device_info
-            FROM authentication_logs
-            WHERE user_id = :user_id
-            ORDER BY datetime(created_at) DESC
-            LIMIT 20
-        """), {"user_id": user_id})
-        recent_auths = list(recent_query)  # Materialize the results
+        # Get user data
+        user = db.query(User).filter(User.id == user_id).first()
         
-        # Get user data - all fields except face_encoding (BLOB)
-        user_query = db.execute(text("""
-            SELECT id, name, email, department, role, password_hash, created_at, last_authenticated
-            FROM users 
-            WHERE id = :user_id
-        """), {"user_id": user_id})
-        user = user_query.fetchone()
+        # Get authentication logs for the user
+        auth_logs = db.query(AuthenticationLog).filter(AuthenticationLog.user_id == user_id).order_by(
+            AuthenticationLog.created_at.desc()
+        ).limit(20).all()
         
-        # If user not found in database, check folder structure
+        # If user not found in DB, check data directory as a fallback
         if not user:
             data_path = Path("/app/data")
-            user_folder = data_path / user_id
-            
-            if not user_folder.exists() or not user_folder.is_dir():
-                raise HTTPException(
-                    status_code=404,
-                    detail=f"User {user_id} not found"
-                )
-        
-        # Log what we found
-        logger.info(f"Found {len(recent_auths)} recent authentications for user {user_id}")
-        if recent_auths:
-            latest_auth = recent_auths[0]
-            logger.info(f"Latest auth: ID={latest_auth.id}, timestamp={latest_auth.created_at}")
-        
-        # Convert datetime objects to ISO format strings
-        def format_datetime(dt):
-            if dt:
-                try:
-                    if isinstance(dt, str):
-                        # Try to parse string to datetime first
-                        dt = datetime.fromisoformat(dt.replace('Z', '+00:00'))
-                    # Ensure datetime is UTC
-                    if dt.tzinfo is None:
-                        dt = dt.replace(tzinfo=ZoneInfo('UTC'))
-                    # Convert to local timezone
-                    local_dt = dt.astimezone(ZoneInfo(system_timezone))
-                    return local_dt.isoformat()
-                except Exception as e:
-                    logger.error(f"Error formatting datetime {dt}: {e}")
-                    return dt
-            return None
+            if not (data_path / user_id).exists():
+                raise HTTPException(status_code=404, detail=f"User {user_id} not found")
 
-        # Get the latest authentication with emotion data
-        latest_emotion_data = None
-        if recent_auths:
-            for auth in recent_auths:
-                if auth.emotion_data:
-                    try:
-                        latest_emotion_data = json.loads(auth.emotion_data)
+        # Get stats from logs
+        total_attempts = len(auth_logs)
+        successful_attempts = sum(1 for log in auth_logs if log.success is True)
+        success_rate = (successful_attempts / total_attempts * 100) if total_attempts > 0 else 0
+        
+        # Calculate average confidence from successful attempts
+        confidences = [log.confidence for log in auth_logs if log.success is True and log.confidence is not None]
+        avg_confidence = sum(confidences) / len(confidences) if confidences else 0
+        
+        # Format datetime objects to local timezone
+        def format_datetime(dt):
+            if not dt:
+                return None
+            try:
+                # Ensure datetime is timezone-aware (UTC)
+                if dt.tzinfo is None:
+                    dt = dt.replace(tzinfo=pytz.UTC)
+                # Convert to local timezone
+                local_tz = pytz.timezone(system_timezone)
+                return dt.astimezone(local_tz).isoformat()
+            except Exception as e:
+                logger.warning(f"Could not format datetime {dt}: {e}")
+                return dt.isoformat() if hasattr(dt, 'isoformat') else str(dt)
+
+        # Get latest emotion data
+        latest_emotion_data = {}
+        for log in auth_logs:
+            if log.emotion_data is not None:
+                try:
+                    # Use the safe_parse_emotion_data function
+                    parsed_data = safe_parse_emotion_data(log.emotion_data)
+                    if parsed_data:
+                        latest_emotion_data = parsed_data
                         break
-                    except Exception as e:
-                        logger.error(f"Error parsing emotion data: {e}")
+                except Exception as e:
+                    logger.error(f"Error parsing emotion data: {e}")
 
         # Format authentication attempts
-        formatted_attempts = []
-        for auth in recent_auths:
-            try:
-                emotion_data = json.loads(auth.emotion_data) if auth.emotion_data else None
-                formatted_attempts.append({
-                    "id": auth.id,
-                    "user_id": auth.user_id,
-                    "success": bool(auth.success),
-                    "confidence": float(auth.confidence),
-                    "timestamp": format_datetime(auth.created_at),
-                    "emotion_data": emotion_data,
-                    "device_info": auth.device_info
-                })
-            except Exception as e:
-                logger.error(f"Error formatting authentication attempt: {e}")
-                continue
+        formatted_attempts = [{
+            "id": log.id,
+            "user_id": log.user_id,
+            "success": log.success,
+            "confidence": log.confidence,
+            "timestamp": format_datetime(log.created_at),
+            "emotion_data": safe_parse_emotion_data(log.emotion_data) if log.emotion_data is not None else None,
+            "device_info": log.device_info
+        } for log in auth_logs]
 
-        # Calculate success rate
-        total_attempts = stats.total_attempts if stats else 0
-        successful_attempts = stats.successful_attempts if stats else 0
-        success_rate = (successful_attempts / total_attempts * 100) if total_attempts > 0 else 0
-        avg_confidence = float(stats.avg_confidence) if stats and stats.avg_confidence else 0
+        # Get last authenticated timestamp from logs
+        last_authenticated_log = auth_logs[0].created_at if auth_logs else None
+
+        user_details = {
+            "name": f"User {user_id}",
+            "email": None,
+            "department": None,
+            "role": None,
+            "enrolled_at": None,
+        }
+        if user is not None:
+            user_details["name"] = user.name
+            user_details["email"] = user.email
+            user_details["department"] = user.department
+            user_details["role"] = user.role
+            user_details["enrolled_at"] = format_datetime(user.created_at)
 
         return {
-            "user_id": user.id if user else user_id,
-            "name": user.name if user else f"User {user_id}",
-            "email": user.email if user else None,
-            "department": user.department if user else None,
-            "role": user.role if user else None,
-            "enrolled_at": format_datetime(user.created_at) if user and user.created_at else None,
-            "last_authenticated": format_datetime(user.last_authenticated) if user and user.last_authenticated else None,
+            "user_id": user_id,
+            **user_details,
+            "last_authenticated": format_datetime(last_authenticated_log),
             "authentication_stats": {
                 "total_attempts": total_attempts,
                 "successful_attempts": successful_attempts,
@@ -426,13 +293,8 @@ async def get_user_info(user_id: str, db: Session = Depends(get_db)):
             "recent_attempts": formatted_attempts,
             "latest_auth": formatted_attempts[0] if formatted_attempts else None,
             "emotional_state": latest_emotion_data or {
-                "neutral": 1.0,
-                "happy": 0.0,
-                "sad": 0.0,
-                "angry": 0.0,
-                "surprised": 0.0,
-                "fearful": 0.0,
-                "disgusted": 0.0
+                "neutral": 1.0, "happiness": 0.0, "sadness": 0.0, "anger": 0.0,
+                "surprise": 0.0, "fear": 0.0, "disgust": 0.0
             }
         }
             
@@ -524,10 +386,6 @@ async def register_user(
                 detail="Failed to create user data directory"
             )
         
-        # Add user to identity mapping
-        if not add_user_to_identity_mapping(user_id):
-            logger.warning(f"Failed to add user {user_id} to identity mapping, but continuing...")
-        
         # Use "demo" as default password
         user_password = "demo"
         
@@ -550,9 +408,6 @@ async def register_user(
                 status_code=500,
                 detail="Failed to create user record"
             )
-        
-        # Notify coordinator about new user
-        notify_coordinator_new_user(user_id)
         
         # Trigger federated training in the background
         background_tasks.add_task(train_model_task)

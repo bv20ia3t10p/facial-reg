@@ -11,9 +11,6 @@ from pathlib import Path
 sys.path.append(str(Path(__file__).resolve().parents[2]))
 
 from src.models.privacy_biometric_model import PrivacyBiometricModel
-from src.services.biometric_model_loader import BiometricModelLoader
-from src.services.mapping_service import MappingService
-from src.db.database import get_db, Session
 
 # Configure logging
 logging.basicConfig(

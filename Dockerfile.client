@@ -51,5 +51,5 @@ COPY models/best_pretrained_model.pth /app/models/best_pretrained_model.pth
 COPY data/partitioned/${CLIENT_ID} /app/data/partitioned/${CLIENT_ID}
 COPY data/identity_mapping.json /app/data/
 
-# Run setup script and then start the application
-CMD ["sh", "-c", "python api/scripts/setup_models_and_mapping.py && uvicorn api.src.app:app --host 0.0.0.0 --port 8080 --reload"] 
+# Start the application
+CMD ["uvicorn", "api.src.main:app", "--host", "0.0.0.0", "--port", "8080", "--reload"] 

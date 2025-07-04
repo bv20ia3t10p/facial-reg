@@ -3,7 +3,6 @@ Datetime utilities for handling UTC+7 timestamps
 """
 
 from datetime import datetime, timedelta, timezone
-import pytz
 
 # Define UTC+7 timezone
 UTC_PLUS_7 = timezone(timedelta(hours=7))

@@ -4,17 +4,15 @@ Client-specific user routes for the biometric authentication system
 
 from fastapi import APIRouter, Depends, HTTPException, status
 from sqlalchemy.orm import Session
-from typing import List, Optional, Dict, Union
+from typing import Dict, Union
 from datetime import datetime
 import logging
 import json
 from collections import defaultdict
 from pathlib import Path
 from sqlalchemy import text
-from sqlalchemy.ext.asyncio import AsyncSession
 
-from ..db.database import get_db, User, AuthenticationLog
-from ..utils.security import get_current_user
+from ..db.database import get_db
 
 logger = logging.getLogger(__name__)
 

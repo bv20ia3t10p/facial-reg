@@ -7,7 +7,6 @@ import torch
 import torch.nn as nn
 import torch.nn.functional as F
 import logging
-import os
 from typing import Dict, Tuple, Any
 from torchvision import models
 

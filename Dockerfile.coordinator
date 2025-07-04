@@ -50,4 +50,4 @@ RUN touch /app/database/federated.db
 EXPOSE 8080
 
 # Start coordinator
-CMD ["sh", "-c", "python api/scripts/setup_models_and_mapping.py && uvicorn api.src.coordinator:app --host 0.0.0.0 --port 8080 --reload"] 
+CMD ["uvicorn", "api.src.coordinator:app", "--host", "0.0.0.0", "--port", "8080", "--reload"] 

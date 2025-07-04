@@ -4,8 +4,6 @@ Common utilities used across the application
 
 import uuid
 import logging
-from pathlib import Path
-import json
 import sqlite3
 import os
 import re

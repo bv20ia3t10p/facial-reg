@@ -8,8 +8,6 @@ import json
 from pathlib import Path
 from datetime import datetime
 
-from ..db.database import Client, get_db
-from ..utils.security import generate_uuid
 
 logger = logging.getLogger(__name__)
 

@@ -15,7 +15,6 @@ from pydantic import BaseModel
 from sqlalchemy.orm import Session
 
 from ..db.database import User, get_db
-from .common import generate_uuid
 
 logger = logging.getLogger(__name__)
 

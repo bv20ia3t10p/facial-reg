@@ -7,7 +7,6 @@ import logging
 import torch
 import torch.nn as nn
 from pathlib import Path
-from typing import Optional
 
 # Import both model architectures
 from ..models.privacy_biometric_model import PrivacyBiometricModel
@@ -153,16 +152,6 @@ class BiometricModelLoader:
                     logger.info(f"Found classifier layer {key} with shape {shape}")
                     return shape[0]
         
-        # If we can't determine from model, try to get from mapping service
-        try:
-            from .mapping_service import mapping_service
-            mapping_info = mapping_service.get_mapping_info()
-            num_identities = mapping_info.get("total_identities", 300)
-            logger.info(f"Using number of identities from mapping service: {num_identities}")
-            return num_identities
-        except Exception as e:
-            logger.warning(f"Could not get identities from mapping service: {e}")
-        
         # Default fallback to 300 (from identity_mapping.json)
         logger.warning("Could not determine number of identities from state dict or mapping, using default 300")
         return 300
@@ -220,13 +209,13 @@ class BiometricModelLoader:
             try:
                 # First try strict loading
                 model.load_state_dict(actual_state_dict, strict=True)
-                logger.info(f"Successfully loaded model weights with strict=True")
+                logger.info("Successfully loaded model weights with strict=True")
             except Exception as e:
                 logger.warning(f"Strict loading failed: {e}")
                 try:
                     # Try non-strict loading
                     missing_keys, unexpected_keys = model.load_state_dict(actual_state_dict, strict=False)
-                    logger.info(f"Successfully loaded model weights with strict=False")
+                    logger.info("Successfully loaded model weights with strict=False")
                     
                     if missing_keys:
                         logger.warning(f"Missing keys: {len(missing_keys)} (showing first 5): {missing_keys[:5]}")
@@ -238,10 +227,16 @@ class BiometricModelLoader:
                     # Try to load compatible layers only
                     self._load_compatible_layers(model, actual_state_dict)
             
+            # Attach metadata to the model object if it exists
+            if metadata:
+                for key, value in metadata.items():
+                    setattr(model, key, value)
+                logger.info(f"Attached metadata to model: {list(metadata.keys())}")
+
             # Set model to evaluation mode
             model.eval()
             
-            logger.info(f"Model loaded successfully:")
+            logger.info("Model loaded successfully:")
             logger.info(f"  - Architecture: {architecture}")
             logger.info(f"  - Device: {self.device}")
             logger.info(f"  - Num identities: {num_identities}")
@@ -351,42 +346,4 @@ class BiometricModelLoader:
             logger.info(f"Loaded {len(compatible_state)} compatible layers out of {len(model_state)} total layers")
         else:
             logger.error("No compatible layers found!")
-            raise ValueError("No compatible layers could be loaded from the state dict")
-
-    def _create_fresh_model(self) -> nn.Module:
-        """Create a fresh model when no saved model exists"""
-        try:
-            # Get number of identities from mapping service
-            try:
-                from .mapping_service import mapping_service
-                mapping_info = mapping_service.get_mapping_info()
-                num_identities = mapping_info.get("total_identities", 300)
-                logger.info(f"Using number of identities from mapping service: {num_identities}")
-            except Exception as e:
-                logger.warning(f"Could not get identities from mapping service: {e}")
-                num_identities = 300
-                logger.info(f"Using default number of identities: {num_identities}")
-            
-            # Create a fresh PrivacyBiometricModel
-            logger.info("Creating fresh PrivacyBiometricModel")
-            model = PrivacyBiometricModel(
-                num_identities=num_identities,
-                privacy_enabled=True,
-                embedding_dim=512
-            ).to(self.device)
-            
-            # Set model to evaluation mode
-            model.eval()
-            
-            logger.info(f"Fresh model created successfully:")
-            logger.info(f"  - Architecture: PrivacyBiometricModel")
-            logger.info(f"  - Device: {self.device}")
-            logger.info(f"  - Num identities: {num_identities}")
-            logger.info(f"  - Embedding dim: 512")
-            logger.info(f"  - Note: This is a fresh model without pre-trained weights")
-            
-            return model
-            
-        except Exception as e:
-            logger.error(f"Error creating fresh model: {e}")
-            raise 
+            raise ValueError("No compatible layers could be loaded from the state dict") 

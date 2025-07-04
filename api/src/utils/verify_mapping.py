@@ -2,7 +2,6 @@
 """
 Utility script to verify user ID mapping sorting
 """
-import os
 import logging
 import json
 from pathlib import Path
