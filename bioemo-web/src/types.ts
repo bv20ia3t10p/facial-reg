@@ -27,6 +27,12 @@ export interface VerificationRequest {
   confidence: number;
   status: 'pending' | 'approved' | 'rejected';
   submittedAt: string;
+  processedAt?: string | null;
+  user?: {
+    id: string;
+    name: string;
+    department: string;
+  }
 }
 
 export interface Authentication {

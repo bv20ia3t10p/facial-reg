@@ -124,8 +124,18 @@ function RequestDetailsModal({ request, visible, onClose, onApprove, onReject }:
     >
       <Space direction="vertical" size="large" style={{ width: '100%' }}>
         <div>
-          <Title level={5}>Employee ID</Title>
-          <Text>{request.employeeId}</Text>
+          <Title level={5}>Employee</Title>
+          <Text>{request.user?.name || 'N/A'}</Text>
+        </div>
+        
+        <div>
+          <Title level={5}>Department</Title>
+          <Text>{request.user?.department || 'N/A'}</Text>
+        </div>
+
+        <div>
+          <Title level={5}>Submitted At</Title>
+          <Text>{new Date(request.submittedAt).toLocaleString()}</Text>
         </div>
 
         <div>
@@ -208,9 +218,14 @@ export function VerificationRequestsTable({ requests, loading, onRequestProcesse
 
   const columns = [
     {
-      title: 'Employee ID',
-      dataIndex: 'employeeId',
-      key: 'employeeId',
+      title: 'Employee',
+      dataIndex: ['user', 'name'],
+      key: 'employeeName',
+    },
+    {
+      title: 'Department',
+      dataIndex: ['user', 'department'],
+      key: 'department',
     },
     {
       title: 'Reason',
@@ -220,9 +235,15 @@ export function VerificationRequestsTable({ requests, loading, onRequestProcesse
     },
     {
       title: 'Time',
-      dataIndex: 'timestamp',
-      key: 'timestamp',
+      dataIndex: 'submittedAt',
+      key: 'submittedAt',
       render: (timestamp: string) => new Date(timestamp).toLocaleString(),
+    },
+    {
+      title: 'Processed At',
+      dataIndex: 'processedAt',
+      key: 'processedAt',
+      render: (timestamp: string | null) => timestamp ? new Date(timestamp).toLocaleString() : 'N/A',
     },
     {
       title: 'Status',
@@ -230,14 +251,14 @@ export function VerificationRequestsTable({ requests, loading, onRequestProcesse
       key: 'status',
       render: (status: string) => {
         let color = 'default';
-        if (status === 'Pending') {
+        if (status === 'pending') {
           color = 'orange';
-        } else if (status === 'Approved') {
+        } else if (status === 'approved') {
           color = 'green';
-        } else if (status === 'Rejected') {
+        } else if (status === 'rejected') {
           color = 'red';
         }
-        return <Tag color={color}>{status}</Tag>;
+        return <Tag color={color}>{status.charAt(0).toUpperCase() + status.slice(1)}</Tag>;
       },
     },
     {

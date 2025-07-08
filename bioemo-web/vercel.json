@@ -1,0 +1,8 @@
+{
+  "rewrites": [
+    {
+      "source": "/:path((?!api/|assets/).*)",
+      "destination": "/index.html"
+    }
+  ]
+} 
