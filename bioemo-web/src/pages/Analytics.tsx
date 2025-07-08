@@ -21,26 +21,22 @@ function getEmotionColor(emotion: keyof EmotionPrediction): string {
 }
 
 export function Analytics() {
-  const [timeRange, setTimeRange] = useState<string>('24h');
+  // Hide time range filter: always use '24h'
+  const timeRange = '24h';
   
   const { data: analytics, isLoading } = useQuery<Analytics>({
     queryKey: ['authAnalytics', timeRange],
     queryFn: () => getAuthAnalytics(timeRange),
   });
 
+  // Provide safe fallbacks for missing fields
+  const emotionTrends = (analytics && 'emotionTrends' in analytics && Array.isArray((analytics as any).emotionTrends)) ? (analytics as any).emotionTrends : [];
+  const recentAuthentications = (analytics && 'recentAuthentications' in analytics && Array.isArray((analytics as any).recentAuthentications)) ? (analytics as any).recentAuthentications : [];
+
   return (
     <Space direction="vertical" style={{ width: '100%' }} size="large">
-      <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
-      <Title level={2}>Analytics</Title>
-        <Radio.Group 
-          value={timeRange} 
-          onChange={(e) => setTimeRange(e.target.value)}
-          buttonStyle="solid"
-        >
-          <Radio.Button value="24h">Last 24 Hours</Radio.Button>
-          <Radio.Button value="7d">Last 7 Days</Radio.Button>
-          <Radio.Button value="30d">Last 30 Days</Radio.Button>
-        </Radio.Group>
+      <div style={{ display: 'flex', justifyContent: 'flex-start', alignItems: 'center' }}>
+        <Title level={2}>Analytics</Title>
       </div>
 
       <Row gutter={[16, 16]}>
@@ -80,10 +76,10 @@ export function Analytics() {
       </Row>
 
       {/* Emotion Trends Chart */}
-      {analytics?.emotionTrends && analytics.emotionTrends.length > 0 && (
+      {emotionTrends.length > 0 && (
         <Card title={`Emotion Trends (${timeRange === '24h' ? 'Last 24 Hours' : timeRange === '7d' ? 'Last 7 Days' : 'Last 30 Days'})`}>
           <ResponsiveContainer width="100%" height={300}>
-            <LineChart data={analytics.emotionTrends}>
+            <LineChart data={emotionTrends}>
               <CartesianGrid strokeDasharray="3 3" />
               <XAxis 
                 dataKey="timestamp" 
@@ -102,7 +98,7 @@ export function Analytics() {
                 formatter={(value: number) => [`${(value * 100).toFixed(1)}%`]}
               />
               <Legend />
-              {analytics.emotionTrends[0].emotions && Object.keys(analytics.emotionTrends[0].emotions).map((emotion) => (
+              {emotionTrends?.[0]?.emotions && Object.keys(emotionTrends[0].emotions).map((emotion) => (
                 <Line
                   key={emotion}
                   type="monotone"

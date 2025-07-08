@@ -215,6 +215,16 @@ const getSeverityColor = (severity: 'low' | 'medium' | 'high'): string => {
   return colors[severity];
 };
 
+const filterByTimeRange = <T extends { timestamp: string }>(data: T[], timeRange: string): T[] => {
+  const now = Date.now();
+  let cutoff;
+  if (timeRange === '24h') cutoff = now - 24 * 60 * 60 * 1000;
+  else if (timeRange === '7d') cutoff = now - 7 * 24 * 60 * 60 * 1000;
+  else if (timeRange === '30d') cutoff = now - 30 * 24 * 60 * 60 * 1000;
+  else return data;
+  return data.filter(item => new Date(item.timestamp).getTime() >= cutoff);
+};
+
 const HRDashboard: React.FC = () => {
   const [analytics, setAnalytics] = useState<HRAnalytics | null>(null);
   const [loading, setLoading] = useState(true);
@@ -231,8 +241,8 @@ const HRDashboard: React.FC = () => {
 
     const fetchData = async () => {
       try {
-        // Pass the selected time range to the API
-        const data = await getHRAnalytics(selectedTimeRange);
+        // Always fetch all data, filter on frontend
+        const data = await getHRAnalytics();
         setAnalytics(data);
       } catch (error) {
         console.error('Error fetching HR analytics:', error);
@@ -251,11 +261,19 @@ const HRDashboard: React.FC = () => {
     // Refresh data every 5 minutes
     const interval = setInterval(fetchData, 5 * 60 * 1000);
     return () => clearInterval(interval);
-  }, [navigate, selectedTimeRange]); // Add selectedTimeRange to dependencies
+  }, [navigate]); // Remove selectedTimeRange from dependencies
 
   if (loading || !analytics) {
     return <Card variant="outlined" loading />;
   }
+
+  // Filter analytics data by selectedTimeRange
+  const filteredTrends = filterByTimeRange(analytics.recentEmotionalTrends, selectedTimeRange);
+  const filteredAlerts = filterByTimeRange(analytics.alerts, selectedTimeRange);
+  const filteredDepartments = analytics.departmentAnalytics.map(dept => ({
+    ...dept,
+    trendData: filterByTimeRange(dept.trendData, selectedTimeRange),
+  }));
 
   return (
     <div style={{ padding: '24px' }}>
@@ -313,32 +331,32 @@ const HRDashboard: React.FC = () => {
               </div>
             }
           >
-            <EmotionTrendChart data={analytics.recentEmotionalTrends} />
+            <EmotionTrendChart data={filteredTrends} />
           </Card>
         </Col>
 
         <Col span={8}>
           <Card variant="outlined" title="Recent Alerts">
-            <AlertsTimeline alerts={analytics.alerts} />
+            <AlertsTimeline alerts={filteredAlerts} />
           </Card>
         </Col>
 
         <Col span={12}>
           <Card variant="outlined" title="Department Comparison">
-            <DepartmentComparisonChart departments={analytics.departmentAnalytics} />
+            <DepartmentComparisonChart departments={filteredDepartments} />
           </Card>
         </Col>
 
         <Col span={12}>
           <Card variant="outlined" title="Current Emotion Distribution">
-            <EmotionDistributionPie data={analytics.recentEmotionalTrends[0]} />
+            <EmotionDistributionPie data={filteredTrends[0]} />
           </Card>
         </Col>
 
         <Col span={24}>
           <Card variant="outlined">
           <Tabs defaultActiveKey="1">
-            {analytics.departmentAnalytics.map((dept, index) => (
+            {filteredDepartments.map((dept, index) => (
               <TabPane tab={dept.department} key={String(index + 1)}>
                 <DepartmentMetrics department={dept} />
               </TabPane>
