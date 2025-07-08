@@ -324,7 +324,6 @@ const HRDashboard: React.FC = () => {
                   onChange={setSelectedTimeRange}
                   style={{ width: 120 }}
                 >
-                  <Option value="24h">Last 24 Hours</Option>
                   <Option value="7d">Last 7 Days</Option>
                   <Option value="30d">Last 30 Days</Option>
                 </Select>
