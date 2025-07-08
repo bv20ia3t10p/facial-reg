@@ -3,6 +3,7 @@ import { useQuery } from '@tanstack/react-query';
 import { getAuthAnalytics } from '../services/api';
 import type { EmotionPrediction, Analytics } from '../types';
 import { useState } from 'react';
+import { useTheme } from '../contexts/ThemeContext';
 import { LineChart, Line, XAxis, YAxis, CartesianGrid, Tooltip, Legend, ResponsiveContainer } from 'recharts';
 
 const { Title, Text } = Typography;
@@ -23,6 +24,7 @@ function getEmotionColor(emotion: keyof EmotionPrediction): string {
 export function Analytics() {
   // Hide time range filter: always use '24h'
   const timeRange = '24h';
+  const { isDarkMode } = useTheme();
   
   const { data: analytics, isLoading } = useQuery<Analytics>({
     queryKey: ['authAnalytics', timeRange],
@@ -36,36 +38,36 @@ export function Analytics() {
   return (
     <Space direction="vertical" style={{ width: '100%' }} size="large">
       <div style={{ display: 'flex', justifyContent: 'flex-start', alignItems: 'center' }}>
-        <Title level={2}>Analytics</Title>
+        <Title level={2} style={isDarkMode ? { color: '#e6e6e6' } : {}}>Analytics</Title>
       </div>
 
       <Row gutter={[16, 16]}>
         <Col span={8}>
           <Card>
             <Space direction="vertical" style={{ width: '100%' }}>
-              <Text type="secondary">
+              <Text type="secondary" style={isDarkMode ? { color: '#e6e6e6' } : {}}>
                 {timeRange === '24h' ? 'Daily' : timeRange === '7d' ? 'Weekly' : 'Monthly'} Authentications
               </Text>
-              {isLoading ? <Spin /> : <Title level={3}>{analytics?.dailyAuthentications || 0}</Title>}
+              {isLoading ? <Spin /> : <Title level={3} style={isDarkMode ? { color: '#e6e6e6' } : {}}>{analytics?.dailyAuthentications || 0}</Title>}
             </Space>
           </Card>
         </Col>
         <Col span={8}>
           <Card>
             <Space direction="vertical" style={{ width: '100%' }}>
-              <Text type="secondary">Average Confidence</Text>
-              {isLoading ? <Spin /> : <Title level={3}>{((analytics?.averageConfidence || 0) * 100).toFixed(1)}%</Title>}
+              <Text type="secondary" style={isDarkMode ? { color: '#e6e6e6' } : {}}>Average Confidence</Text>
+              {isLoading ? <Spin /> : <Title level={3} style={isDarkMode ? { color: '#e6e6e6' } : {}}>{((analytics?.averageConfidence || 0) * 100).toFixed(1)}%</Title>}
             </Space>
           </Card>
         </Col>
         <Col span={8}>
           <Card>
             <Space direction="vertical" style={{ width: '100%' }}>
-              <Text type="secondary">Emotion Balance</Text>
+              <Text type="secondary" style={isDarkMode ? { color: '#e6e6e6' } : {}}>Emotion Balance</Text>
               {isLoading ? (
                 <Spin />
               ) : (
-                <Title level={3}>
+                <Title level={3} style={isDarkMode ? { color: '#e6e6e6' } : {}}>
                   {analytics?.emotionDistribution && 
                     (analytics.emotionDistribution.happiness > analytics.emotionDistribution.sadness ? 'Positive' : 'Needs Attention')}
                 </Title>
@@ -120,7 +122,7 @@ export function Analytics() {
             analytics?.emotionDistribution && Object.entries(analytics.emotionDistribution).map(([emotion, value]) => (
               <Col key={emotion} span={12}>
                 <Space direction="vertical" style={{ width: '100%' }}>
-                  <Text strong style={{ textTransform: 'capitalize' }}>{emotion}</Text>
+                  <Text strong style={{ textTransform: 'capitalize', color: isDarkMode ? '#e6e6e6' : undefined }}>{emotion}</Text>
                   <div style={{ width: '100%', background: '#f0f0f0', borderRadius: 4, overflow: 'hidden' }}>
                     <div
                       style={{
@@ -131,7 +133,7 @@ export function Analytics() {
                       }}
                     />
                   </div>
-                  <Text>{(value * 100).toFixed(1)}%</Text>
+                  <Text style={isDarkMode ? { color: '#e6e6e6' } : {}}>{(value * 100).toFixed(1)}%</Text>
                 </Space>
               </Col>
             ))
